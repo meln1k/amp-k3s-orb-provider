@@ -1,0 +1,20 @@
+cloud: eks # EKS mode: S3 storage and the podcert-agent sidecar, so K3s needs no beta feature gates
+amp:
+  url: https://ampcode.com
+snapshots:
+  location: gs://amp-orbs/orbs/ # the chart writes gs:// on every backend; here it is the RustFS bucket
+  eks:
+    region: us-east-1
+    ateletRoleArn: arn:aws:iam::000000000000:role/unused # required by the chart, unused on K3s
+workers:
+  architecture: amd64
+  autoFill: true
+  # The Amp-hosted a1.* sizes. Names must match the orb types on the provider in Amp
+  # (lowercase letters, digits and dashes). A worker reserves memoryGi + 1 GiB.
+  types:
+    - {name: tiny, cpu: 1, memoryGi: 2, min: 0, warm: 0}
+    - {name: small, cpu: 2, memoryGi: 4, min: 0, warm: 1}
+    - {name: medium, cpu: 4, memoryGi: 8, min: 0, warm: 0}
+    - {name: large, cpu: 8, memoryGi: 16, min: 0, warm: 0}
+    - {name: xxlarge, cpu: 16, memoryGi: 32, min: 0, warm: 0}
+  default: small

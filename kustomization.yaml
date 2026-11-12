@@ -1,0 +1,96 @@
+# Helm post-renderer overlay: Amp's orb-provider chart (cloud=eks) shrunk for a small K3s cluster.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - all.yaml # the chart's rendered output, written by post-render.sh
+  - rustfs.yaml
+secretGenerator:
+  # In-cluster S3 credentials, read from s3.env (create it once, see README).
+  - name: orb-snapshots-s3
+    namespace: ate-system
+    envs: [s3.env]
+    options: {disableNameSuffixHash: true}
+patches:
+  # The chart's pre-install hook (ate-setup bootstrap) already applies this policy from the chart's
+  # admission-policies/ without Helm ownership, so Helm 3 fails the install with "already exists"
+  # when it creates the rendered copy. Leave the policy to the hook, which reapplies it on upgrade.
+  - target: {kind: ValidatingAdmissionPolicy, name: sandboxconfig-assets}
+    patch: |-
+      $patch: delete
+      apiVersion: admissionregistration.k8s.io/v1
+      kind: ValidatingAdmissionPolicy
+      metadata: {name: sandboxconfig-assets}
+  - target: {kind: ValidatingAdmissionPolicyBinding, name: sandboxconfig-assets}
+    patch: |-
+      $patch: delete
+      apiVersion: admissionregistration.k8s.io/v1
+      kind: ValidatingAdmissionPolicyBinding
+      metadata: {name: sandboxconfig-assets}
+  # Postgres holds only the runtime's records: 500Gi / 2 CPU -> 5Gi / 250m.
+  - target: {kind: StatefulSet, name: postgres, namespace: ate-system}
+    patch: |-
+      - {op: replace, path: /spec/volumeClaimTemplates/0/spec/resources/requests/storage, value: 5Gi}
+  - target: {kind: StatefulSet, name: postgres, namespace: ate-system}
+    patch: |-
+      apiVersion: apps/v1
+      kind: StatefulSet
+      metadata: {name: postgres, namespace: ate-system}
+      spec:
+        template:
+          spec:
+            containers:
+            - name: postgres
+              resources: {requests: {cpu: 250m, memory: 512Mi}, limits: {cpu: "2", memory: 1Gi}}
+  # One replica is plenty for 2 to 10 nodes.
+  - target: {kind: Deployment, name: ate-api-server|ate-idp-server, namespace: ate-system}
+    patch: |-
+      - {op: replace, path: /spec/replicas, value: 1}
+  # K3s nodes have no EKS image credential provider: drop its args and host mounts (as Substrate's
+  # kind overlay does), so atelet pulls the public images anonymously. The test ops make the
+  # render fail loudly if a new chart moves them.
+  - target: {kind: DaemonSet, name: atelet, namespace: ate-system}
+    patch: |-
+      - {op: test, path: /spec/template/spec/containers/0/name, value: atelet}
+      - {op: test, path: /spec/template/spec/containers/0/args/0, value: "--image-credential-provider-config=/run/image-credential-provider/config.yaml"}
+      - {op: test, path: /spec/template/spec/containers/0/args/1, value: "--image-credential-provider-bin-dir=/run/image-credential-provider/bin"}
+      - {op: remove, path: /spec/template/spec/containers/0/args/1}
+      - {op: remove, path: /spec/template/spec/containers/0/args/0}
+      - {op: test, path: /spec/template/spec/containers/0/volumeMounts/7/name, value: image-credential-provider-bin}
+      - {op: test, path: /spec/template/spec/containers/0/volumeMounts/8/name, value: image-credential-provider-config}
+      - {op: remove, path: /spec/template/spec/containers/0/volumeMounts/8}
+      - {op: remove, path: /spec/template/spec/containers/0/volumeMounts/7}
+      - {op: test, path: /spec/template/spec/volumes/4/name, value: image-credential-provider-bin}
+      - {op: test, path: /spec/template/spec/volumes/5/name, value: image-credential-provider-config}
+      - {op: remove, path: /spec/template/spec/volumes/5}
+      - {op: remove, path: /spec/template/spec/volumes/4}
+  # Paused orbs go to the in-cluster RustFS instead of AWS S3.
+  - target: {kind: DaemonSet, name: atelet, namespace: ate-system}
+    patch: |-
+      apiVersion: apps/v1
+      kind: DaemonSet
+      metadata: {name: atelet, namespace: ate-system}
+      spec:
+        template:
+          spec:
+            initContainers:
+            - name: objectstore-plugin
+              env:
+              - {name: AWS_ENDPOINT_URL, value: "http://rustfs.ate-system.svc:9000"}
+              - {name: AWS_S3_USE_PATH_STYLE, value: "true"}
+              - {name: AWS_ACCESS_KEY_ID, valueFrom: {secretKeyRef: {name: orb-snapshots-s3, key: AWS_ACCESS_KEY_ID}}}
+              - {name: AWS_SECRET_ACCESS_KEY, valueFrom: {secretKeyRef: {name: orb-snapshots-s3, key: AWS_SECRET_ACCESS_KEY}}}
+  - target: {kind: Deployment, name: ate-api-server, namespace: ate-system}
+    patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata: {name: ate-api-server, namespace: ate-system}
+      spec:
+        template:
+          spec:
+            initContainers:
+            - name: objectstore-plugin
+              env:
+              - {name: AWS_ENDPOINT_URL, value: "http://rustfs.ate-system.svc:9000"}
+              - {name: AWS_S3_USE_PATH_STYLE, value: "true"}
+              - {name: AWS_ACCESS_KEY_ID, valueFrom: {secretKeyRef: {name: orb-snapshots-s3, key: AWS_ACCESS_KEY_ID}}}
+              - {name: AWS_SECRET_ACCESS_KEY, valueFrom: {secretKeyRef: {name: orb-snapshots-s3, key: AWS_SECRET_ACCESS_KEY}}}
