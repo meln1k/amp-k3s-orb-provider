@@ -5,10 +5,10 @@
 # it). Checked against chart 0.20261109.1946.
 - {op: test, path: /spec/template/spec/initContainers/2/name, value: provider}
 # The worker image: Substrate's ateworker-microvm, built from the commit the chart's
-# ateworker-gvisor comes from (see microvm/README.md). The provider only accepts a digest-pinned
-# image; replace this digest with the one of your build.
+# ateworker-gvisor comes from, reproducibly (see microvm/README.md to rebuild and check the
+# digest). The provider only accepts a digest-pinned image.
 - {op: test, path: /spec/template/spec/initContainers/2/env/15/name, value: WORKER_IMAGE}
-- {op: replace, path: /spec/template/spec/initContainers/2/env/15/value, value: "ghcr.io/meln1k/substrate/ateworker-microvm@sha256:e62b707228a9456b2473e46ef4a1d5633ffbcba681e75195d5e878f57f8d193b"}
+- {op: replace, path: /spec/template/spec/initContainers/2/env/15/value, value: "ghcr.io/meln1k/substrate/ateworker-microvm@sha256:9f3dcecdb737c330db4479605f51be422c9b388e989dc5c1073cb56ffed77756"}
 - {op: add, path: /spec/template/spec/volumes/-, value: {name: provider-patched, emptyDir: {}}}
 - {op: add, path: /spec/template/spec/initContainers/2/volumeMounts/-, value: {name: provider-patched, mountPath: /opt/amp-orb-provider-patched}}
 - op: add
