@@ -65,12 +65,13 @@ Each node needs:
   `storage.googleapis.com`.
 
 ```sh
+# every node
+git clone https://github.com/meln1k/amp-k3s-orb-provider && cd amp-k3s-orb-provider
+sudo ./node-prep.sh
 # server
 curl -sfL https://get.k3s.io | sh -s - server --disable traefik --disable servicelb
 # each agent (token: /var/lib/rancher/k3s/server/node-token on the server)
 curl -sfL https://get.k3s.io | K3S_URL=https://<server>:6443 K3S_TOKEN=<token> sh -
-# every node
-sudo ./node-prep.sh
 ```
 
 Label every machine that should run orbs. Don't taint them: atelet only needs the label, and
@@ -82,10 +83,15 @@ kubectl label node <node> ate.dev/sandboxClass=gvisor
 
 ## 3. Install
 
-Run this from the K3s server or any machine with `kubectl` access to the cluster, in a clone of
-this repo. Use Helm 3 (3.14 or newer). Helm 4 only accepts post-renderers packaged as plugins.
+Run this as root on the K3s server, in the clone of this repo. Use Helm 3 (3.14 or newer): Helm 4
+only accepts post-renderers packaged as plugins. From another machine, use the cluster's
+kubeconfig instead of the K3s one.
 
 ```sh
+# Helm 3, and the K3s kubeconfig for it (K3s's kubectl finds it on its own, Helm does not)
+curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+
 # S3 credentials for RustFS, used by kustomization.yaml; gitignored
 (umask 077; printf 'AWS_ACCESS_KEY_ID=%s\nAWS_SECRET_ACCESS_KEY=%s\n' \
   "$(openssl rand -hex 10)" "$(openssl rand -hex 24)" > s3.env)
@@ -125,12 +131,16 @@ Measured on one 4-vCPU, 16 GB Hetzner machine (Ubuntu 24.04, K3s v1.37.2):
 | --- | --- |
 | Idle cluster RAM | about 1.9 GB |
 | Spawn on a warm `small` worker | 11 s |
-| Pause | 21 to 25 s |
-| Resume | 17 s |
+| First orb on a node (pulls the orb image once) | about 60 s |
+| Pause | 17 to 25 s |
+| Resume | 14 to 17 s |
 
-Pause and resume time grows with what the orb writes. Each pause uploads the orb's whole
-filesystem diff, zstd-compressed. A repo whose `.agents/setup` installs system packages and
-`node_modules` came to about 1.5 GiB per paused orb. Project snapshots are stored the same way.
+Pause and resume time grows with what the orb writes. Each pause saves the orb's whole
+filesystem diff, zstd-compressed (about 8 s), and uploads it to RustFS (about 10 s for 1.3 GiB).
+A repo whose `.agents/setup` installs system packages and `node_modules` came to 1.3 to 1.5 GiB
+per paused orb. Project snapshots are stored the same way. A resume on the node that paused the
+orb restores from a local copy in about 4 s; the rest is the orb reconnecting to Amp. A resume on
+another node downloads the snapshot from RustFS first.
 
 ## Sizing
 
