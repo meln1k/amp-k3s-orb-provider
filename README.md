@@ -103,7 +103,7 @@ read -rsp 'Provider token: ' T; printf '\n'
 kubectl -n amp-orbs create secret generic amp-orb-spawner --from-literal=AMP_ORB_PROVIDER_TOKEN="$T"; unset T
 
 helm install orb-provider oci://us-central1-docker.pkg.dev/amp-prod-0/orb-provider/chart \
-  -n amp-orbs -f values.yaml --post-renderer ./post-render.sh --wait --timeout 20m
+  --version 0.20261109.1946 -n amp-orbs -f values.yaml --post-renderer ./post-render.sh --wait --timeout 20m
 ```
 
 Every pod should be ready within a few minutes. The first orb on a node also pulls the 7 GiB
@@ -217,11 +217,12 @@ kubectl -n amp-orbs rollout restart deployment/amp-orb-provider
 
 ## Upgrade
 
-Run the upgrade with the same post-renderer every time:
+This overlay is checked against chart 0.20261109.1946, so the commands pin it. Pull the repo and
+upgrade to the version it pins, with the same post-renderer every time:
 
 ```sh
 helm upgrade orb-provider oci://us-central1-docker.pkg.dev/amp-prod-0/orb-provider/chart \
-  -n amp-orbs --reset-then-reuse-values --post-renderer ./post-render.sh --wait --timeout 30m
+  --version 0.20261109.1946 -n amp-orbs --reset-then-reuse-values --post-renderer ./post-render.sh --wait --timeout 30m
 ```
 
 If a new chart moves the atelet credential-provider args, the `test` ops fail the render instead
