@@ -1,5 +1,5 @@
-# Memory snapshots (see README): the provider container patches two strings in its own bundle at
-# start and refuses to start unless each is found exactly once.
+# Memory snapshots and worker size (see README): the provider container patches three strings in
+# its own bundle at start and refuses to start unless each is found exactly once.
 - {op: test, path: /spec/template/spec/initContainers/2/name, value: provider}
 - {op: add, path: /spec/template/spec/volumes/-, value: {name: provider-patched, emptyDir: {}}}
 - {op: add, path: /spec/template/spec/initContainers/2/volumeMounts/-, value: {name: provider-patched, mountPath: /opt/amp-orb-provider-patched}}
@@ -17,6 +17,8 @@
       ['preferredFidelity:"SNAPSHOT_FIDELITY_ROOTFS"', 'preferredFidelity:"SNAPSHOT_FIDELITY_MEMORY"'],
       // A pause returns once the snapshot is on the node; the upload continues in the background.
       ['{durable:"DURABILITY_MODE_SYNCHRONOUS",', '{durable:"DURABILITY_MODE_ASYNCHRONOUS",'],
+      // Worker pods get the orb's memory plus 128 MiB instead of plus 1 GiB.
+      ['`${i.memoryGi+1}Gi`', '`${i.memoryGi*1024+128}Mi`'],
     ]
     let js = readFileSync(`${src}/main.js`, 'utf8')
     for (const [from, to] of patches) {

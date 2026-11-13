@@ -26,6 +26,8 @@ What the overlay changes in the chart:
 - Memory snapshots: the provider patches two settings in its own code at start, so a pause
   saves process memory too and returns before the upload (see
   [Memory snapshots](#memory-snapshots)).
+- Worker size: the same patch gives each orb's worker pod its memory plus 128 MiB instead of
+  plus 1 GiB (see [Sizing](#sizing)).
 
 The control plane requests about 1.7 CPU and 0.5 GiB of memory less than the chart's default,
 for about 0.8 CPU and 2.2 GiB in total, and 5 GiB of disk plus the snapshot store instead of
@@ -158,9 +160,18 @@ image.
 
 ## Sizing
 
-Each running orb reserves `memoryGi + 1 GiB` on a node. For example, a 64 GiB machine fits about
-six `medium` (8 GiB) orbs or eleven `small` (4 GiB) orbs next to the control plane. Each orb also
-uses disk on its node: the 7 GiB orb image once per node, plus whatever the orb writes.
+Each running orb reserves `memoryGi` plus 128 MiB on a node, and a `small` orb requests 1 CPU.
+For example, a 64 GiB machine with enough CPUs fits about seven `medium` (8 GiB) orbs or fourteen
+`small` (4 GiB) orbs next to the control plane. Each orb also uses disk on its node: the 7 GiB
+orb image once per node, plus whatever the orb writes.
+
+The chart gives each worker pod 1 GiB on top of the orb's memory. The worker keeps only 64 MiB of
+that for itself, kills an orb that stays over its own `memoryGi`, and limits a pause's page cache
+to what the orb leaves unused, so the pod stays under its limit with any extra of at least 64 MiB.
+The rest only lets a pause write faster. On the [Performance](#performance) machine at plus
+128 MiB, `small` orbs holding over 3 GiB came within 44 MiB of the pod's limit while pausing, and
+no pod reached it. An orb that goes over its own memory is killed at any extra, and Amp's
+provider then deletes it with its snapshots, so give orbs a size with room to spare.
 
 A paused orb's snapshot holds the memory it uses as well as its file changes. Each paused orb
 keeps its latest snapshot on its node for a day (see [Snapshot timing](#snapshot-timing)) and
@@ -208,8 +219,8 @@ start again. Substrate's gVisor worker can also save process memory (`runsc chec
 as the snapshot is on the node's disk, while the upload to the gateway continues in the
 background, so a pause takes a few seconds instead of waiting for the upload.
 
-The provider has no setting for either, so the patch replaces two exact strings in its code
-when the container starts. It refuses to start if a string is not found exactly once, so a chart
+The provider has no setting for either, so the patch replaces two exact strings in its code,
+plus a third for the worker size, when the container starts. It refuses to start if a string is not found exactly once, so a chart
 that moves them fails loudly (the provider logs `k3s patch: found 0 times`) instead of silently
 running without it. Then remove the patch from `kustomization.yaml` and upgrade: orbs fall back
 to file-only snapshots. The chart's default is file-only, so memory snapshots are less tested.
