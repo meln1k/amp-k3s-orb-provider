@@ -13,22 +13,23 @@ from the gateway. No inbound ports are needed.
 
 What the overlay changes in the chart:
 
-- Postgres: 500 GiB PVC and 2 CPU request become 5 GiB and 250m.
+- Postgres: a 5 GiB volume instead of 500 GiB; requests 250m CPU and 512 MiB instead of 2 CPU
+  and 1 GiB; limits 2 CPU and 1 GiB instead of 16 CPU and 2 GiB. Its `podcert-agent` init
+  container runs as root, because Postgres refuses a TLS key owned by another user.
 - `ate-api-server` and `ate-idp-server`: 2 replicas become 1.
 - Snapshots: go to an in-cluster [Versity S3 Gateway](https://github.com/versity/versitygw)
-  instead of AWS. It stores each object as a plain file, so its data can live on a local disk or
-  an NFS share on your NAS.
+  instead of AWS. It stores each object as a plain file, on a local volume or an NFS export on
+  your NAS (see [Snapshot store](#snapshot-store)).
 - atelet: the EKS image credential provider is removed, so the public images are pulled
   anonymously. Snapshot uploads get more time, and the local copy is kept for a day (see
   [Snapshot timing](#snapshot-timing)).
 - Memory snapshots: the provider patches two settings in its own code at start, so a pause
   saves process memory too and returns before the upload (see
   [Memory snapshots](#memory-snapshots)).
-- The `sandboxconfig-assets` admission policy is left to the chart's pre-install hook, which
-  already applies it. Without this, Helm 3 fails a fresh install with "already exists".
 
-Control-plane requests drop from 2.56 CPU / 3.2 GiB / 500 GiB to about 0.85 CPU / 2.8 GiB /
-5 GiB, plus the snapshot data.
+The control plane requests about 1.7 CPU and 0.5 GiB of memory less than the chart's default,
+for about 0.8 CPU and 2.2 GiB in total, and 5 GiB of disk plus the snapshot store instead of
+500 GiB.
 
 ## 1. Create the provider in Amp
 
@@ -89,9 +90,9 @@ kubectl label node <node> ate.dev/sandboxClass=gvisor
 
 ## 3. Install
 
-Run this as root on the K3s server, in the clone of this repo. Use Helm 3 (3.14 or newer): Helm 4
-only accepts post-renderers packaged as plugins. From another machine, use the cluster's
-kubeconfig instead of the K3s one.
+Run this as root on the K3s server, in the clone of this repo. Use Helm 3: Helm 4 only accepts
+post-renderers packaged as plugins. From another machine, use the cluster's kubeconfig instead
+of the K3s one. To keep paused orbs on a NAS, set up [`nas-patch.yaml`](#snapshot-store) first.
 
 ```sh
 # Helm 3, and the K3s kubeconfig for it (K3s's kubectl finds it on its own, Helm does not)
@@ -107,12 +108,12 @@ kubectl create namespace amp-orbs
 read -rsp 'Provider token: ' T; printf '\n'
 kubectl -n amp-orbs create secret generic amp-orb-spawner --from-literal=AMP_ORB_PROVIDER_TOKEN="$T"; unset T
 
-helm install orb-provider oci://us-central1-docker.pkg.dev/amp-prod-0/orb-provider/chart \
-  --version 0.20261109.1946 -n amp-orbs -f values.yaml --post-renderer ./post-render.sh --wait --timeout 20m
+# install; the same command upgrades
+helm upgrade --install orb-provider oci://us-central1-docker.pkg.dev/amp-prod-0/orb-provider/chart \
+  --version 0.20261109.1946 -n amp-orbs -f values.yaml --post-renderer ./post-render.sh --wait --timeout 30m
 ```
 
-Every pod should be ready within a few minutes. The first orb on a node also pulls the 7 GiB
-orb image.
+Every pod should be ready within a few minutes.
 
 ## 4. Start a thread
 
@@ -146,9 +147,14 @@ together:
 Resume times run from the cluster receiving the job until the orb is ready. Amp takes another
 2 to 15 s to send the job. Processes, memory and files were intact after every resume.
 
+The UNAS exported its shared drive as NFSv3 only (4.2 was refused) and moved about 107 MB/s
+writing and 117 MB/s reading. Uploads reach only 25 to 30 MB/s each: a node uploads one snapshot
+at a time, and the gateway assembles each multipart upload by copying its parts into a new file,
+which over NFSv3 reads them back across the network (about 20 s for a 1.1 GB memory image).
+
 On a 4-vCPU, 16 GB Hetzner machine, the idle cluster used about 1.9 GB of RAM, a spawn on a warm
-`small` worker took 11 s, and the first orb on a node took about 60 s, because it pulls the
-7 GiB orb image once.
+`small` worker took 11 s, and the first orb on a node took about 60 s, because it pulls the orb
+image.
 
 ## Sizing
 
@@ -156,30 +162,26 @@ Each running orb reserves `memoryGi + 1 GiB` on a node. For example, a 64 GiB ma
 six `medium` (8 GiB) orbs or eleven `small` (4 GiB) orbs next to the control plane. Each orb also
 uses disk on its node: the 7 GiB orb image once per node, plus whatever the orb writes.
 
+A paused orb's snapshot holds the memory it uses as well as its file changes. Each paused orb
+keeps a copy on its node for a day (see [Snapshot timing](#snapshot-timing)) and one in the
+snapshot store.
+
+### Snapshot store
+
 Paused orbs live in the `versitygw` pod's `/data`, one file per object. By default that is a
 local-path volume under `/var/lib/rancher/k3s/storage` on whichever node runs the pod.
 
-To keep them on a NAS, replace the `data` volume in `versitygw.yaml` with the commented `nfs`
-volume, and install `nfs-common` on every node. The gateway needs write access to the export.
-Also delete the `snapshots-data` PersistentVolumeClaim at the top of `versitygw.yaml`: nothing
-uses it then. On an existing install, the next upgrade then deletes the local volume and every
-paused orb stored in it.
+To keep them on a NAS instead, set the export's server and path in
+[`nas-patch.yaml`](nas-patch.yaml), uncomment it in `kustomization.yaml`, and install
+`nfs-common` on every node. The gateway needs write access to the export. Object metadata goes in
+files under `meta/` next to `data/` on the export, so NFSv3, which has no extended attributes,
+works too; Versity calls this mode experimental. It passed the S3 calls Substrate makes on an
+NFSv3 export with `all_squash`, as the UNAS sets up its shared drives. On an existing install,
+switching deletes the local volume and every paused orb in it.
 
-- **NFS 4.2** works as is: the gateway stores object metadata in extended attributes, which NFS
-  supports from 4.2 on.
-- **NFSv3**, which is what a UniFi UNAS serves, has no extended attributes, and the gateway
-  refuses to start on it ("xattrs are not supported on this filesystem"). Uncomment
-  `VGW_META_SIDECAR` and the `/meta` mount: metadata then goes in files under `meta/` next to
-  `data/` on the same export. Versity calls this mode experimental. It passed the same S3 calls
-  Substrate makes on an NFSv3 export with `all_squash`, as the UNAS sets up its shared drives.
-- For a UNAS: enable NFS in UniFi Drive > Settings > Services, create a shared drive, and leave it
-  in the default Collaborative (all squash) mode. Its export path is
-  `/var/nfs/shared/<Shared_Drive_Name>`.
-- On a UNAS 2 over gigabit, the shared drive was exported as NFSv3 only (4.2 was refused), and
-  a `sync` export moved about 107 MB/s writing and 117 MB/s reading. Snapshot uploads reached
-  only 25 to 30 MB/s each: a node uploads one snapshot at a time, and the gateway assembles each
-  multipart upload by copying its parts into a new file, which over NFSv3 reads them back across
-  the network (about 20 s for a 1.1 GB memory image). Downloads run in parallel at line rate.
+For a UniFi UNAS: enable NFS in UniFi Drive > Settings > Services, create a shared drive, and
+leave it in the default Collaborative (all squash) mode. Its export path is
+`/var/nfs/shared/<Shared_Drive_Name>`.
 
 ### Snapshot timing
 
@@ -209,7 +211,7 @@ The provider has no setting for either, so the patch replaces two exact strings 
 when the container starts. It refuses to start if a string is not found exactly once, so a chart
 that moves them fails loudly (the provider logs `k3s patch: found 0 times`) instead of silently
 running without it. Then remove the patch from `kustomization.yaml` and upgrade: orbs fall back
-to file-only snapshots.
+to file-only snapshots. The chart's default is file-only, so memory snapshots are less tested.
 
 Things to know:
 
@@ -222,10 +224,6 @@ Things to know:
   gVisor worker, Substrate's code restores the orb's files without its memory, but an orb whose
   snapshot is still on its node first tries to move to a matching node. This has not been tested
   here: after such an upgrade, resume a test orb before relying on it.
-- **Snapshot size:** a snapshot holds the memory the orb uses as well as its file changes. An orb
-  holding 1 GiB came to 1.6 GB on the node and 1.4 GB compressed in the store. Size the node's
-  disk for the local copies and the store for the uploads.
-- The chart's default is file-only snapshots, so this path is less tested than the default.
 
 ## Troubleshoot
 
@@ -247,19 +245,17 @@ kubectl -n amp-orbs rollout restart deployment/amp-orb-provider
 
 ## Upgrade
 
-This overlay is checked against chart 0.20261109.1946, so the commands pin it. Pull the repo and
-upgrade to the version it pins, with the same post-renderer every time:
+This overlay is checked against chart 0.20261109.1946, which the install command pins. To
+upgrade, pull the repo and run the install command again. It applies `values.yaml` and the
+overlay as they are in the repo.
 
-```sh
-helm upgrade orb-provider oci://us-central1-docker.pkg.dev/amp-prod-0/orb-provider/chart \
-  --version 0.20261109.1946 -n amp-orbs --reset-then-reuse-values --post-renderer ./post-render.sh --wait --timeout 30m
-```
-
-If a new chart moves the atelet credential-provider args, the `test` ops fail the render instead
-of silently installing something broken. If it moves the strings `provider-patch.yaml` replaces,
-the provider fails to start; see [Memory snapshots](#memory-snapshots). Before upgrading, read
-`changelog.md` in Amp's [install bundle](https://ampcode.com/docs/orbs/self-hosted/bundle.zip)
-for releases that need a manual step.
+Before moving to a new chart version, read `changelog.md` in Amp's
+[install bundle](https://ampcode.com/docs/orbs/self-hosted/bundle.zip) for releases that need a
+manual step. The render fails if the chart renames Postgres or the replica targets, or moves the
+atelet arguments, mounts and init containers the overlay patches. It cannot catch a renamed
+atelet, `ate-api-server` or `amp-orb-provider` workload: those patches would be skipped, and
+snapshots would go to AWS or lose their memory. If the provider's patched strings move, the
+provider fails to start; see [Memory snapshots](#memory-snapshots).
 
 ## Uninstall
 

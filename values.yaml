@@ -1,6 +1,4 @@
 cloud: eks # EKS mode: S3 storage and the podcert-agent sidecar, so K3s needs no beta feature gates
-amp:
-  url: https://ampcode.com
 snapshots:
   location: gs://amp-orbs/orbs/ # the chart writes gs:// on every backend; here it is the bucket on the in-cluster S3 gateway
   eks:

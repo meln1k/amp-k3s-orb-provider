@@ -1,5 +1,5 @@
 # S3 for paused orbs: Versity S3 Gateway with its POSIX backend, which stores each object as a
-# plain file under /data, so /data can be a local disk or an NFS share on a NAS (see README).
+# plain file under /data, on a local volume or, with nas-patch.yaml, an NFS export.
 # Lives in ate-system so the runtime reaches it.
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -26,6 +26,13 @@ spec:
     metadata: {labels: {app: versitygw}}
     spec:
       securityContext: {runAsUser: 1000, runAsGroup: 1000, fsGroup: 1000}
+      initContainers:
+      # The POSIX backend serves each top-level directory as a bucket. The chart stores snapshots
+      # under gs://amp-orbs/orbs/, so the amp-orbs directory is the whole bucket setup.
+      - name: create-bucket
+        image: versity/versitygw:v1.11.0@sha256:8319a530d08d537426e2f855bae5280709795dc73a3f0c347973ef915d6343c5
+        command: [mkdir, -p, /data/amp-orbs]
+        volumeMounts: [{name: data, mountPath: /data, subPath: data}]
       containers:
       - name: versitygw
         image: versity/versitygw:v1.11.0@sha256:8319a530d08d537426e2f855bae5280709795dc73a3f0c347973ef915d6343c5
@@ -34,49 +41,15 @@ spec:
         env:
         - {name: ROOT_ACCESS_KEY_ID, valueFrom: {secretKeyRef: {name: orb-snapshots-s3, key: AWS_ACCESS_KEY_ID}}}
         - {name: ROOT_SECRET_ACCESS_KEY, valueFrom: {secretKeyRef: {name: orb-snapshots-s3, key: AWS_SECRET_ACCESS_KEY}}}
-        # Object metadata goes in extended attributes on /data. NFS before 4.2 (such as a UniFi
-        # UNAS) has none: uncomment this and the /meta mount below. Versity calls it experimental.
-        # - {name: VGW_META_SIDECAR, value: /meta}
         readinessProbe: {tcpSocket: {port: api}, periodSeconds: 5}
         resources: {requests: {cpu: 50m, memory: 64Mi}, limits: {memory: 512Mi}}
         volumeMounts:
         - {name: data, mountPath: /data, subPath: data}
-        # - {name: data, mountPath: /meta, subPath: meta}
       volumes:
       - name: data
         persistentVolumeClaim: {claimName: snapshots-data}
-        # An NFS export on a NAS instead, writable by the gateway (uid 1000, or squashed to the
-        # export's anonymous user). Every node needs nfs-common. For a UniFi UNAS shared drive:
-        # nfs: {server: <UNAS IP>, path: /var/nfs/shared/<Shared_Drive_Name>}
 ---
-apiVersion: batch/v1
-kind: Job
-metadata: {name: snapshots-bucket-init, namespace: ate-system}
-spec:
-  backoffLimit: 10
-  ttlSecondsAfterFinished: 600
-  template:
-    spec:
-      restartPolicy: OnFailure
-      containers:
-      - name: create-bucket
-        image: amazon/aws-cli:2.38.5@sha256:c8156a0e74e13929a42d7e60f0d4e14e7d28d980cd21822505d4bff80e5460c1
-        env:
-        - {name: AWS_REGION, value: us-east-1}
-        - {name: AWS_ENDPOINT_URL, value: "http://versitygw.ate-system.svc:7070"}
-        - {name: AWS_ACCESS_KEY_ID, valueFrom: {secretKeyRef: {name: orb-snapshots-s3, key: AWS_ACCESS_KEY_ID}}}
-        - {name: AWS_SECRET_ACCESS_KEY, valueFrom: {secretKeyRef: {name: orb-snapshots-s3, key: AWS_SECRET_ACCESS_KEY}}}
-        command: [/bin/sh, -c]
-        args:
-        - |
-          for i in $(seq 1 60); do
-            aws s3api head-bucket --bucket amp-orbs 2>/dev/null && exit 0
-            aws s3api create-bucket --bucket amp-orbs 2>/dev/null && exit 0
-            sleep 2
-          done
-          exit 1
----
-# ate-system denies ingress by default; let only the runtime and the init job in.
+# ate-system denies ingress by default; let only the runtime in.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata: {name: versitygw, namespace: ate-system}
@@ -86,5 +59,4 @@ spec:
   ingress:
   - from:
     - podSelector: {matchExpressions: [{key: app, operator: In, values: [ate-api-server, atelet]}]}
-    - podSelector: {matchLabels: {batch.kubernetes.io/job-name: snapshots-bucket-init}}
     ports: [{protocol: TCP, port: api}]

@@ -1,40 +1,31 @@
 # Helm post-renderer overlay: Amp's orb-provider chart (cloud=eks) shrunk for a small K3s cluster.
+# Kustomize skips a patch whose target matches nothing, so where it can, this overlay fails the
+# render instead when a new chart renames or moves what it patches: `test` ops in JSON patches,
+# the `replicas` list, and strategic merges without a target. Strategic merges move the list
+# items they patch to the front, so they are used only where that item is already first.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 resources:
   - all.yaml # the chart's rendered output, written by post-render.sh
   - versitygw.yaml
 secretGenerator:
-  # In-cluster S3 credentials, read from s3.env (create it once, see README).
   - name: orb-snapshots-s3
     namespace: ate-system
     envs: [s3.env]
     options: {disableNameSuffixHash: true}
+replicas:
+  - {name: ate-api-server, count: 1}
+  - {name: ate-idp-server, count: 1}
 patches:
-  # Memory snapshots: a paused orb keeps its running processes (see provider-patch.yaml).
-  - target: {kind: Deployment, name: amp-orb-provider, namespace: amp-orbs}
-    path: provider-patch.yaml
-  # The chart's pre-install hook (ate-setup bootstrap) already applies this policy from the chart's
-  # admission-policies/ without Helm ownership, so Helm 3 fails the install with "already exists"
-  # when it creates the rendered copy. Leave the policy to the hook, which reapplies it on upgrade.
-  - target: {kind: ValidatingAdmissionPolicy, name: sandboxconfig-assets}
-    patch: |-
-      $patch: delete
-      apiVersion: admissionregistration.k8s.io/v1
-      kind: ValidatingAdmissionPolicy
-      metadata: {name: sandboxconfig-assets}
-  - target: {kind: ValidatingAdmissionPolicyBinding, name: sandboxconfig-assets}
-    patch: |-
-      $patch: delete
-      apiVersion: admissionregistration.k8s.io/v1
-      kind: ValidatingAdmissionPolicyBinding
-      metadata: {name: sandboxconfig-assets}
-  # Postgres holds only the runtime's records: 500Gi / 2 CPU -> 5Gi / 250m.
+  - path: provider-patch.yaml
+    target: {kind: Deployment, name: amp-orb-provider, namespace: amp-orbs}
+  # Paused orbs on a NAS instead of a local volume: set the export in nas-patch.yaml and uncomment.
+  # - path: nas-patch.yaml
   - target: {kind: StatefulSet, name: postgres, namespace: ate-system}
     patch: |-
+      - {op: test, path: /spec/volumeClaimTemplates/0/metadata/name, value: data}
       - {op: replace, path: /spec/volumeClaimTemplates/0/spec/resources/requests/storage, value: 5Gi}
-  - target: {kind: StatefulSet, name: postgres, namespace: ate-system}
-    patch: |-
+  - patch: |-
       apiVersion: apps/v1
       kind: StatefulSet
       metadata: {name: postgres, namespace: ate-system}
@@ -50,13 +41,9 @@ patches:
             initContainers:
             - name: podcert-agent
               securityContext: {runAsUser: 0}
-  # One replica is plenty for 2 to 10 nodes.
-  - target: {kind: Deployment, name: ate-api-server|ate-idp-server, namespace: ate-system}
-    patch: |-
-      - {op: replace, path: /spec/replicas, value: 1}
-  # K3s nodes have no EKS image credential provider: drop its args and host mounts (as Substrate's
-  # kind overlay does), so atelet pulls the public images anonymously. The test ops make the
-  # render fail loudly if a new chart moves them.
+  # atelet: K3s nodes have no EKS image credential provider, so drop its args and host mounts (as
+  # Substrate's kind overlay does) and pull the public images anonymously. Then the snapshot
+  # upload limit and the local copy's lifetime (see README, Snapshot timing).
   - target: {kind: DaemonSet, name: atelet, namespace: ate-system}
     patch: |-
       - {op: test, path: /spec/template/spec/containers/0/name, value: atelet}
@@ -72,37 +59,11 @@ patches:
       - {op: test, path: /spec/template/spec/volumes/5/name, value: image-credential-provider-config}
       - {op: remove, path: /spec/template/spec/volumes/5}
       - {op: remove, path: /spec/template/spec/volumes/4}
-  # Give snapshot uploads more time. atelet cancels and retries an upload after
-  # --snapshot-upload-timeout (2m) plus the snapshot's size at --snapshot-upload-est-throughput-mib
-  # (100). A NAS on gigabit, with uploads queued one at a time per node and multipart assembly on
-  # NFS, moves ~25 MB/s per snapshot: two 2 GB orbs pausing together hit the default on the first try.
-  # 3m + size at 20 MiB/s gives a 2.3 GB snapshot ~5 min, and bigger orbs proportionally more.
-  - target: {kind: DaemonSet, name: atelet, namespace: ate-system}
-    patch: |-
-      - {op: test, path: /spec/template/spec/containers/0/name, value: atelet}
       - {op: add, path: /spec/template/spec/containers/0/args/-, value: "--snapshot-upload-timeout=3m"}
       - {op: add, path: /spec/template/spec/containers/0/args/-, value: "--snapshot-upload-est-throughput-mib=20"}
-  # Keep a paused orb's snapshot on the node's disk for a day (default 30m), as well as on the NAS.
-  # A pause always writes the snapshot locally first, then uploads it; while the local copy lasts,
-  # a wake restores from it in seconds and the orb is pinned to that node. After the delay atelet
-  # "detaches" the orb (deletes the local copy) and the next wake reads from the NAS. A wake when the
-  # node is full also detaches it to another node. Local copies are uncompressed (~1-3 GB per small
-  # orb) and atelet doesn't evict them under disk pressure, so size the delay to the node's free disk.
-  - target: {kind: DaemonSet, name: atelet, namespace: ate-system}
-    patch: |-
-      - {op: test, path: /spec/template/spec/containers/0/name, value: atelet}
       - {op: add, path: /spec/template/spec/containers/0/args/-, value: "--snapshot-detach-delay=24h"}
-  # Paused orbs go to the in-cluster S3 gateway instead of AWS S3. JSON patches, not strategic merge:
-  # a strategic merge moves objectstore-plugin ahead of podcert-agent, and then it starts before
-  # its serving certificate exists and crash-loops.
-  - target: {kind: DaemonSet, name: atelet, namespace: ate-system}
-    patch: |-
-      - {op: test, path: /spec/template/spec/initContainers/1/name, value: objectstore-plugin}
-      - {op: add, path: /spec/template/spec/initContainers/1/env/-, value: {name: AWS_ENDPOINT_URL, value: "http://versitygw.ate-system.svc:7070"}}
-      - {op: add, path: /spec/template/spec/initContainers/1/env/-, value: {name: AWS_S3_USE_PATH_STYLE, value: "true"}}
-      - {op: add, path: /spec/template/spec/initContainers/1/env/-, value: {name: AWS_ACCESS_KEY_ID, valueFrom: {secretKeyRef: {name: orb-snapshots-s3, key: AWS_ACCESS_KEY_ID}}}}
-      - {op: add, path: /spec/template/spec/initContainers/1/env/-, value: {name: AWS_SECRET_ACCESS_KEY, valueFrom: {secretKeyRef: {name: orb-snapshots-s3, key: AWS_SECRET_ACCESS_KEY}}}}
-  - target: {kind: Deployment, name: ate-api-server, namespace: ate-system}
+  # Snapshots go to the in-cluster S3 gateway (versitygw.yaml) instead of AWS S3.
+  - target: {kind: DaemonSet|Deployment, name: atelet|ate-api-server, namespace: ate-system}
     patch: |-
       - {op: test, path: /spec/template/spec/initContainers/1/name, value: objectstore-plugin}
       - {op: add, path: /spec/template/spec/initContainers/1/env/-, value: {name: AWS_ENDPOINT_URL, value: "http://versitygw.ate-system.svc:7070"}}

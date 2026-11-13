@@ -1,0 +1,27 @@
+# Paused orbs on a NAS: the gateway stores them on an NFS export instead of the local volume, which
+# is deleted. Set the export below and uncomment nas-patch.yaml in kustomization.yaml. The export
+# must be writable by uid 1000 (or squash to an anonymous user who can write), and every node
+# needs nfs-common. Object metadata goes in files under meta/ next to data/ on the export, so this
+# also works on NFSv3, which has no extended attributes; Versity calls this mode experimental.
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: versitygw, namespace: ate-system}
+spec:
+  template:
+    spec:
+      containers:
+      - name: versitygw
+        env:
+        - {name: VGW_META_SIDECAR, value: /meta}
+        volumeMounts:
+        - {name: data, mountPath: /meta, subPath: meta}
+      volumes:
+      - name: data
+        persistentVolumeClaim: null
+        # For a UniFi UNAS shared drive: {server: <UNAS IP>, path: /var/nfs/shared/<Shared_Drive_Name>}
+        nfs: {server: "<NAS IP>", path: /export/path}
+---
+$patch: delete
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata: {name: snapshots-data, namespace: ate-system}
