@@ -2,7 +2,7 @@ cloud: eks # EKS mode: S3 storage and the podcert-agent sidecar, so K3s needs no
 amp:
   url: https://ampcode.com
 snapshots:
-  location: gs://amp-orbs/orbs/ # the chart writes gs:// on every backend; here it is the RustFS bucket
+  location: gs://amp-orbs/orbs/ # the chart writes gs:// on every backend; here it is the bucket on the in-cluster S3 gateway
   eks:
     region: us-east-1
     ateletRoleArn: arn:aws:iam::000000000000:role/unused # required by the chart, unused on K3s

@@ -7,22 +7,23 @@ mode. A Helm post-renderer fits it to K3s. Amp does not support this setup.
 
 How it works: one pod in the cluster connects out to ampcode.com and receives spawn, pause and
 resume jobs. Each orb runs as a gVisor sandbox pod on one of your nodes. A paused orb's files
-are saved to an S3 store (RustFS) running in the cluster, so it can resume on any node. No
+are saved to an S3 gateway (Versity) running in the cluster, so it can resume on any node. No
 inbound ports are needed.
 
 What the overlay changes in the chart:
 
 - Postgres: 500 GiB PVC and 2 CPU request become 5 GiB and 250m.
 - `ate-api-server` and `ate-idp-server`: 2 replicas become 1.
-- Snapshots: go to an in-cluster RustFS (S3) instead of AWS. These are the same settings
-  Substrate uses for its kind profile.
+- Snapshots: go to an in-cluster [Versity S3 Gateway](https://github.com/versity/versitygw)
+  instead of AWS. It stores each object as a plain file, so its data can live on a local disk or
+  an NFS share on your NAS.
 - atelet: the EKS image credential provider is removed, so the public images are pulled
   anonymously.
 - The `sandboxconfig-assets` admission policy is left to the chart's pre-install hook, which
   already applies it. Without this, Helm 3 fails a fresh install with "already exists".
 
 Control-plane requests drop from 2.56 CPU / 3.2 GiB / 500 GiB to about 0.85 CPU / 2.8 GiB /
-5 GiB, plus the RustFS data.
+5 GiB, plus the snapshot data.
 
 ## 1. Create the provider in Amp
 
@@ -92,7 +93,7 @@ kubeconfig instead of the K3s one.
 curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
 export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
 
-# S3 credentials for RustFS, used by kustomization.yaml; gitignored
+# S3 credentials for the snapshot gateway, used by kustomization.yaml; gitignored
 (umask 077; printf 'AWS_ACCESS_KEY_ID=%s\nAWS_SECRET_ACCESS_KEY=%s\n' \
   "$(openssl rand -hex 10)" "$(openssl rand -hex 24)" > s3.env)
 
@@ -136,11 +137,13 @@ Measured on one 4-vCPU, 16 GB Hetzner machine (Ubuntu 24.04, K3s v1.37.2):
 | Resume | 14 to 17 s |
 
 Pause and resume time grows with what the orb writes. Each pause saves the orb's whole
-filesystem diff, zstd-compressed (about 8 s), and uploads it to RustFS (about 10 s for 1.3 GiB).
+filesystem diff, zstd-compressed (about 8 s), and uploads it (about 10 s for 1.3 GiB).
 A repo whose `.agents/setup` installs system packages and `node_modules` came to 1.3 to 1.5 GiB
 per paused orb. Project snapshots are stored the same way. A resume on the node that paused the
 orb restores from a local copy in about 4 s; the rest is the orb reconnecting to Amp. A resume on
-another node downloads the snapshot from RustFS first.
+another node downloads the snapshot first.
+
+These numbers were measured with RustFS on a local disk, before the switch to Versity.
 
 ## Sizing
 
@@ -148,9 +151,19 @@ Each running orb reserves `memoryGi + 1 GiB` on a node. For example, a 64 GiB ma
 six `medium` (8 GiB) orbs or eleven `small` (4 GiB) orbs next to the control plane. Each orb also
 uses disk on its node: the 7 GiB orb image once per node, plus whatever the orb writes.
 
-Paused orbs live in RustFS, under `/var/lib/rancher/k3s/storage` on the node running RustFS.
-Keep that on a local disk. To store snapshots on a NAS, run an S3 server on the NAS itself and
-point the overlay at it, rather than mounting a network share under RustFS.
+Paused orbs live in the `versitygw` pod's `/data`, one file per object. By default that is a
+local-path volume under `/var/lib/rancher/k3s/storage` on whichever node runs the pod.
+
+To keep them on a NAS, replace the `data` volume in `versitygw.yaml` with the commented `nfs`
+volume, and install `nfs-common` on every node. The export must be writable by uid 1000.
+
+- **NFS 4.2** works as is: the gateway stores object metadata in extended attributes, which NFS
+  supports from 4.2 on.
+- **Older NFS or SMB** have no extended attributes. Set `VGW_META_SIDECAR` and mount a second
+  volume at `/meta`, as the comment in `versitygw.yaml` shows. Versity calls this mode
+  experimental.
+- Every pause uploads the whole snapshot, so the link to the NAS sets your pause time: gigabit
+  moves about 110 MB/s, or about 12 s for a 1.3 GiB snapshot.
 
 ## Troubleshoot
 
@@ -199,4 +212,5 @@ kubectl delete validatingadmissionpolicy,validatingadmissionpolicybinding sandbo
 kubectl delete role,rolebinding atenet-dns -n kube-system --ignore-not-found
 ```
 
-Deleting `ate-system` also deletes RustFS and every paused orb in it.
+Deleting `ate-system` also deletes the gateway. With the default local volume, that deletes
+every paused orb; on an NFS share the files stay.

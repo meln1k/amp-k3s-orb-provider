@@ -3,7 +3,7 @@ apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 resources:
   - all.yaml # the chart's rendered output, written by post-render.sh
-  - rustfs.yaml
+  - versitygw.yaml
 secretGenerator:
   # In-cluster S3 credentials, read from s3.env (create it once, see README).
   - name: orb-snapshots-s3
@@ -69,20 +69,20 @@ patches:
       - {op: test, path: /spec/template/spec/volumes/5/name, value: image-credential-provider-config}
       - {op: remove, path: /spec/template/spec/volumes/5}
       - {op: remove, path: /spec/template/spec/volumes/4}
-  # Paused orbs go to the in-cluster RustFS instead of AWS S3. JSON patches, not strategic merge:
+  # Paused orbs go to the in-cluster S3 gateway instead of AWS S3. JSON patches, not strategic merge:
   # a strategic merge moves objectstore-plugin ahead of podcert-agent, and then it starts before
   # its serving certificate exists and crash-loops.
   - target: {kind: DaemonSet, name: atelet, namespace: ate-system}
     patch: |-
       - {op: test, path: /spec/template/spec/initContainers/1/name, value: objectstore-plugin}
-      - {op: add, path: /spec/template/spec/initContainers/1/env/-, value: {name: AWS_ENDPOINT_URL, value: "http://rustfs.ate-system.svc:9000"}}
+      - {op: add, path: /spec/template/spec/initContainers/1/env/-, value: {name: AWS_ENDPOINT_URL, value: "http://versitygw.ate-system.svc:7070"}}
       - {op: add, path: /spec/template/spec/initContainers/1/env/-, value: {name: AWS_S3_USE_PATH_STYLE, value: "true"}}
       - {op: add, path: /spec/template/spec/initContainers/1/env/-, value: {name: AWS_ACCESS_KEY_ID, valueFrom: {secretKeyRef: {name: orb-snapshots-s3, key: AWS_ACCESS_KEY_ID}}}}
       - {op: add, path: /spec/template/spec/initContainers/1/env/-, value: {name: AWS_SECRET_ACCESS_KEY, valueFrom: {secretKeyRef: {name: orb-snapshots-s3, key: AWS_SECRET_ACCESS_KEY}}}}
   - target: {kind: Deployment, name: ate-api-server, namespace: ate-system}
     patch: |-
       - {op: test, path: /spec/template/spec/initContainers/1/name, value: objectstore-plugin}
-      - {op: add, path: /spec/template/spec/initContainers/1/env/-, value: {name: AWS_ENDPOINT_URL, value: "http://rustfs.ate-system.svc:9000"}}
+      - {op: add, path: /spec/template/spec/initContainers/1/env/-, value: {name: AWS_ENDPOINT_URL, value: "http://versitygw.ate-system.svc:7070"}}
       - {op: add, path: /spec/template/spec/initContainers/1/env/-, value: {name: AWS_S3_USE_PATH_STYLE, value: "true"}}
       - {op: add, path: /spec/template/spec/initContainers/1/env/-, value: {name: AWS_ACCESS_KEY_ID, valueFrom: {secretKeyRef: {name: orb-snapshots-s3, key: AWS_ACCESS_KEY_ID}}}}
       - {op: add, path: /spec/template/spec/initContainers/1/env/-, value: {name: AWS_SECRET_ACCESS_KEY, valueFrom: {secretKeyRef: {name: orb-snapshots-s3, key: AWS_SECRET_ACCESS_KEY}}}}
