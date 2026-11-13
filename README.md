@@ -170,6 +170,13 @@ volume, and install `nfs-common` on every node. The gateway needs write access t
 - Every pause uploads the whole snapshot, so the NAS link and disks set your pause time:
   gigabit moves about 110 MB/s, or about 12 s for a 1.3 GiB snapshot.
 
+## Experimental: microVM orbs with memory snapshots
+
+[`microvm/`](microvm/README.md) runs orbs as Kata/Cloud Hypervisor microVMs instead of gVisor.
+Paused orbs keep their running processes, a pause takes about a second and a wake about two.
+It needs `/dev/kvm` on every orb node and a worker image you build yourself, patches Amp's
+provider at start, and Docker does not work inside these orbs yet. It is off by default.
+
 ## Troubleshoot
 
 If an orb does not start, read the thread's setup log and the provider's logs:

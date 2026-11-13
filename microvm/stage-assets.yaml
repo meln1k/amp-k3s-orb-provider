@@ -43,3 +43,16 @@ spec:
           echo staged
         volumeMounts: [{name: work, mountPath: /work}]
       volumes: [{name: work, emptyDir: {}}]
+---
+# ate-system denies ingress by default and the gateway's own policy admits only the runtime and
+# its bucket Job; let this Job upload too.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: versitygw-microvm-assets, namespace: ate-system}
+spec:
+  podSelector: {matchLabels: {app: versitygw}}
+  policyTypes: [Ingress]
+  ingress:
+  - from:
+    - podSelector: {matchLabels: {batch.kubernetes.io/job-name: microvm-assets}}
+    ports: [{protocol: TCP, port: api}]
