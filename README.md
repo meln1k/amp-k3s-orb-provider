@@ -155,15 +155,20 @@ Paused orbs live in the `versitygw` pod's `/data`, one file per object. By defau
 local-path volume under `/var/lib/rancher/k3s/storage` on whichever node runs the pod.
 
 To keep them on a NAS, replace the `data` volume in `versitygw.yaml` with the commented `nfs`
-volume, and install `nfs-common` on every node. The export must be writable by uid 1000.
+volume, and install `nfs-common` on every node. The gateway needs write access to the export.
 
 - **NFS 4.2** works as is: the gateway stores object metadata in extended attributes, which NFS
   supports from 4.2 on.
-- **Older NFS or SMB** have no extended attributes. Set `VGW_META_SIDECAR` and mount a second
-  volume at `/meta`, as the comment in `versitygw.yaml` shows. Versity calls this mode
-  experimental.
-- Every pause uploads the whole snapshot, so the link to the NAS sets your pause time: gigabit
-  moves about 110 MB/s, or about 12 s for a 1.3 GiB snapshot.
+- **NFSv3**, which is what a UniFi UNAS serves, has no extended attributes, and the gateway
+  refuses to start on it ("xattrs are not supported on this filesystem"). Uncomment
+  `VGW_META_SIDECAR` and the `/meta` mount: metadata then goes in files under `meta/` next to
+  `data/` on the same export. Versity calls this mode experimental. It passed the same S3 calls
+  Substrate makes on an NFSv3 export with `all_squash`, as the UNAS sets up its shared drives.
+- For a UNAS: enable NFS in UniFi Drive > Settings > Services, create a shared drive, and leave it
+  in the default Collaborative (all squash) mode. Its export path is
+  `/var/nfs/shared/<Shared_Drive_Name>`.
+- Every pause uploads the whole snapshot, so the NAS link and disks set your pause time:
+  gigabit moves about 110 MB/s, or about 12 s for a 1.3 GiB snapshot.
 
 ## Troubleshoot
 

@@ -34,18 +34,20 @@ spec:
         env:
         - {name: ROOT_ACCESS_KEY_ID, valueFrom: {secretKeyRef: {name: orb-snapshots-s3, key: AWS_ACCESS_KEY_ID}}}
         - {name: ROOT_SECRET_ACCESS_KEY, valueFrom: {secretKeyRef: {name: orb-snapshots-s3, key: AWS_SECRET_ACCESS_KEY}}}
-        # Object metadata goes in extended attributes on /data. If /data is a share without
-        # them (NFS before 4.2, or SMB), set this and mount a second volume at /meta, such as
-        # another directory on the same share. Versity calls this mode experimental.
+        # Object metadata goes in extended attributes on /data. NFS before 4.2 (such as a UniFi
+        # UNAS) has none: uncomment this and the /meta mount below. Versity calls it experimental.
         # - {name: VGW_META_SIDECAR, value: /meta}
         readinessProbe: {tcpSocket: {port: api}, periodSeconds: 5}
         resources: {requests: {cpu: 50m, memory: 64Mi}, limits: {memory: 512Mi}}
-        volumeMounts: [{name: data, mountPath: /data}]
+        volumeMounts:
+        - {name: data, mountPath: /data, subPath: data}
+        # - {name: data, mountPath: /meta, subPath: meta}
       volumes:
       - name: data
         persistentVolumeClaim: {claimName: snapshots-data}
-        # A NAS export instead (every node needs nfs-common; the export must be writable by uid 1000):
-        # nfs: {server: nas.lan, path: /volume1/amp-orbs}
+        # An NFS export on a NAS instead, writable by the gateway (uid 1000, or squashed to the
+        # export's anonymous user). Every node needs nfs-common. For a UniFi UNAS shared drive:
+        # nfs: {server: <UNAS IP>, path: /var/nfs/shared/<Shared_Drive_Name>}
 ---
 apiVersion: batch/v1
 kind: Job
