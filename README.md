@@ -163,8 +163,9 @@ six `medium` (8 GiB) orbs or eleven `small` (4 GiB) orbs next to the control pla
 uses disk on its node: the 7 GiB orb image once per node, plus whatever the orb writes.
 
 A paused orb's snapshot holds the memory it uses as well as its file changes. Each paused orb
-keeps a copy on its node for a day (see [Snapshot timing](#snapshot-timing)) and one in the
-snapshot store.
+keeps its latest snapshot on its node for a day (see [Snapshot timing](#snapshot-timing)) and
+its two newest in the snapshot store: a pause deletes the snapshot before the previous one. On
+the [Performance](#performance) test, an orb holding 1 GiB took about 2 × 1.4 GB in the store.
 
 ### Snapshot store
 
