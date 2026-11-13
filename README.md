@@ -167,15 +167,35 @@ volume, and install `nfs-common` on every node. The gateway needs write access t
 - For a UNAS: enable NFS in UniFi Drive > Settings > Services, create a shared drive, and leave it
   in the default Collaborative (all squash) mode. Its export path is
   `/var/nfs/shared/<Shared_Drive_Name>`.
-- Every pause uploads the whole snapshot, so the NAS link and disks set your pause time:
-  gigabit moves about 110 MB/s, or about 12 s for a 1.3 GiB snapshot.
+- On a UNAS 2 over gigabit, the shared drive was exported as NFSv3 only (4.2 was refused), and
+  a `sync` export moved about 107 MB/s writing and 117 MB/s reading. Snapshot uploads reached
+  only 25 to 30 MB/s each: a node uploads one snapshot at a time, and the gateway assembles each
+  multipart upload by copying its parts into a new file, which over NFSv3 reads them back across
+  the network (about 35 s for a 2 GB memory image). Downloads run in parallel at line rate.
+
+### Snapshot timing
+
+Each pause writes the snapshot to the node's disk first, then atelet uploads it to the gateway.
+The overlay changes two atelet defaults for a homelab store:
+
+- **Upload time limit:** atelet cancels and retries an upload after `--snapshot-upload-timeout`
+  plus the snapshot's size at `--snapshot-upload-est-throughput-mib`. The defaults (2m, 100 MiB/s)
+  cut off two 2 GB snapshots uploading together to a NAS; the overlay sets 3m and 20 MiB/s,
+  about 5 minutes for a 2.3 GB snapshot.
+- **Local copy:** atelet keeps the latest snapshot on the node for `--snapshot-detach-delay`
+  (default 30m, here 24h). Until then a wake restores from that copy without touching the store,
+  and the orb is pinned to that node; if the node is full, the orb moves to another node and
+  restores from the store. Local copies are uncompressed, about 1 to 3 GB per paused `small`
+  orb, and atelet does not delete them early when the disk fills, so lower the delay on nodes
+  with little free disk.
 
 ## Experimental: microVM orbs with memory snapshots
 
 [`microvm/`](microvm/README.md) runs orbs as Kata/Cloud Hypervisor microVMs instead of gVisor.
 Paused orbs keep their running processes, a pause takes about a second and a wake about two.
-It needs `/dev/kvm` on every orb node and a worker image you build yourself, patches Amp's
-provider at start, and Docker does not work inside these orbs yet. It is off by default.
+It needs `/dev/kvm` on every orb node, uses a worker image built reproducibly from Substrate's
+source, patches Amp's provider at start, and Docker does not work inside these orbs yet. It is
+off by default.
 
 ## Troubleshoot
 
