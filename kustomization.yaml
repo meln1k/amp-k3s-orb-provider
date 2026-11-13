@@ -13,6 +13,10 @@ secretGenerator:
     namespace: ate-system
     envs: [s3.env]
     options: {disableNameSuffixHash: true}
+  - name: orb-snapshots-key # encrypts the snapshot store; see README, Snapshot encryption
+    namespace: ate-system
+    files: [snapshots.key]
+    options: {disableNameSuffixHash: true}
 replicas:
   - {name: ate-api-server, count: 1}
   - {name: ate-idp-server, count: 1}

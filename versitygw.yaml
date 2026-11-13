@@ -1,5 +1,6 @@
 # S3 for paused orbs: Versity S3 Gateway with its POSIX backend, which stores each object as a
-# plain file under /data, on a local volume or, with nas-patch.yaml, an NFS export.
+# file. It writes them through gocryptfs, so the volume, a local one or, with nas-patch.yaml, an
+# NFS export, only holds encrypted files and names (see README, Snapshot encryption).
 # Lives in ate-system so the runtime reaches it.
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -25,29 +26,52 @@ spec:
   template:
     metadata: {labels: {app: versitygw}}
     spec:
-      securityContext: {runAsUser: 1000, runAsGroup: 1000, fsGroup: 1000}
       initContainers:
-      # The POSIX backend serves each top-level directory as a bucket. The chart stores snapshots
-      # under gs://amp-orbs/orbs/, so the amp-orbs directory is the whole bucket setup.
-      - name: create-bucket
+      # gocryptfs's static binary from its signed GitHub release, checked against its SHA-256.
+      - name: get-gocryptfs
         image: versity/versitygw:v1.11.0@sha256:8319a530d08d537426e2f855bae5280709795dc73a3f0c347973ef915d6343c5
-        command: [mkdir, -p, /data/amp-orbs]
-        volumeMounts: [{name: data, mountPath: /data, subPath: data}]
+        command:
+        - sh
+        - -ec
+        - |
+          wget -qO /tmp/g.tgz https://github.com/rfjakob/gocryptfs/releases/download/v2.7.0/gocryptfs_v2.7.0_linux-static_amd64.tar.gz
+          echo "3e2e2a5270921e01bfbb46ebc39b614d0146d6961a28de4ba9cc5d43534b8dcf  /tmp/g.tgz" | sha256sum -c -
+          tar -xzf /tmp/g.tgz -C /tools gocryptfs
+        volumeMounts: [{name: tools, mountPath: /tools}]
       containers:
       - name: versitygw
         image: versity/versitygw:v1.11.0@sha256:8319a530d08d537426e2f855bae5280709795dc73a3f0c347973ef915d6343c5
-        args: [--port, ":7070", posix, /data]
+        # Mounting a FUSE filesystem needs a privileged container.
+        securityContext: {privileged: true}
+        command:
+        - sh
+        - -ec
+        - |
+          # An empty volume gets a new gocryptfs master key, stored on it encrypted with snapshots.key.
+          [ -e /cipher/gocryptfs.conf ] || /tools/gocryptfs -q -init -passfile /key/snapshots.key /cipher
+          mkdir -p /plain
+          /tools/gocryptfs -q -passfile /key/snapshots.key /cipher /plain
+          # The POSIX backend serves each top-level directory as a bucket. The chart stores
+          # snapshots under gs://amp-orbs/orbs/, so the amp-orbs directory is the whole bucket setup.
+          mkdir -p /plain/data/amp-orbs ${VGW_META_SIDECAR:-}
+          exec versitygw --port :7070 posix /plain/data
         ports: [{containerPort: 7070, name: api}]
         env:
         - {name: ROOT_ACCESS_KEY_ID, valueFrom: {secretKeyRef: {name: orb-snapshots-s3, key: AWS_ACCESS_KEY_ID}}}
         - {name: ROOT_SECRET_ACCESS_KEY, valueFrom: {secretKeyRef: {name: orb-snapshots-s3, key: AWS_SECRET_ACCESS_KEY}}}
         readinessProbe: {tcpSocket: {port: api}, periodSeconds: 5}
-        resources: {requests: {cpu: 50m, memory: 64Mi}, limits: {memory: 512Mi}}
+        # Restart the container if gocryptfs exits, which leaves /plain unreadable.
+        livenessProbe: {exec: {command: [test, -d, /plain/data/amp-orbs]}, periodSeconds: 10}
+        resources: {requests: {cpu: 50m, memory: 64Mi}, limits: {memory: 1Gi}}
         volumeMounts:
-        - {name: data, mountPath: /data, subPath: data}
+        - {name: data, mountPath: /cipher, subPath: encrypted}
+        - {name: tools, mountPath: /tools, readOnly: true}
+        - {name: key, mountPath: /key, readOnly: true}
       volumes:
       - name: data
         persistentVolumeClaim: {claimName: snapshots-data}
+      - {name: tools, emptyDir: {}}
+      - {name: key, secret: {secretName: orb-snapshots-key, defaultMode: 0400}}
 ---
 # ate-system denies ingress by default; let only the runtime in.
 apiVersion: networking.k8s.io/v1

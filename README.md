@@ -18,8 +18,9 @@ What the overlay changes in the chart:
   container runs as root, because Postgres refuses a TLS key owned by another user.
 - `ate-api-server` and `ate-idp-server`: 2 replicas become 1.
 - Snapshots: go to an in-cluster [Versity S3 Gateway](https://github.com/versity/versitygw)
-  instead of AWS. It stores each object as a plain file, on a local volume or an NFS export on
-  your NAS (see [Snapshot store](#snapshot-store)).
+  instead of AWS. It stores each object as a file encrypted with gocryptfs, on a local volume or
+  an NFS export on your NAS (see [Snapshot store](#snapshot-store) and
+  [Snapshot encryption](#snapshot-encryption)).
 - atelet: the EKS image credential provider is removed, so the public images are pulled
   anonymously. Snapshot uploads get more time, and the local copy is kept for a day (see
   [Snapshot timing](#snapshot-timing)).
@@ -105,6 +106,10 @@ export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
 (umask 077; printf 'AWS_ACCESS_KEY_ID=%s\nAWS_SECRET_ACCESS_KEY=%s\n' \
   "$(openssl rand -hex 10)" "$(openssl rand -hex 24)" > s3.env)
 
+# the key that encrypts paused orbs, also gitignored; keep a copy somewhere safe, because
+# without it every paused orb in the snapshot store is lost
+(umask 077; openssl rand -base64 32 > snapshots.key)
+
 # the provider token from step 1, typed at a hidden prompt
 kubectl create namespace amp-orbs
 read -rsp 'Provider token: ' T; printf '\n'
@@ -180,20 +185,48 @@ the [Performance](#performance) test, an orb holding 1 GiB took about 2 × 1.4 G
 
 ### Snapshot store
 
-Paused orbs live in the `versitygw` pod's `/data`, one file per object. By default that is a
-local-path volume under `/var/lib/rancher/k3s/storage` on whichever node runs the pod.
+Paused orbs live in the `versitygw` pod, one encrypted file per object, under `encrypted/` on its
+volume. By default that is a local-path volume under `/var/lib/rancher/k3s/storage` on whichever
+node runs the pod.
 
 To keep them on a NAS instead, set the export's server and path in
-[`nas-patch.yaml`](nas-patch.yaml), uncomment it in `kustomization.yaml`, and install
-`nfs-common` on every node. The gateway needs write access to the export. Object metadata goes in
-files under `meta/` next to `data/` on the export, so NFSv3, which has no extended attributes,
-works too; Versity calls this mode experimental. It passed the S3 calls Substrate makes on an
-NFSv3 export with `all_squash`, as the UNAS sets up its shared drives. On an existing install,
-switching deletes the local volume and every paused orb in it.
+[`nas-patch.yaml`](nas-patch.yaml), uncomment it in `kustomization.yaml`, and install `nfs-common`
+on every node. The gateway needs write access to the export. Object metadata goes in files under
+`meta/` next to `data/` inside the encrypted store, so NFSv3, which has no extended attributes,
+works too; Versity calls this mode experimental. It passed the S3 calls Substrate makes on an NFSv3
+export with `all_squash`, as the UNAS sets up its shared drives. On an existing install, switching
+deletes the local volume and every paused orb in it.
 
 For a UniFi UNAS: enable NFS in UniFi Drive > Settings > Services, create a shared drive, and
 leave it in the default Collaborative (all squash) mode. Its export path is
 `/var/nfs/shared/<Shared_Drive_Name>`.
+
+### Snapshot encryption
+
+A paused orb's snapshot holds its memory, which can include tokens and other secrets. The gateway
+writes every object through [gocryptfs](https://nuetzlich.net/gocryptfs/), so its volume, and the
+NFS traffic to a NAS, only carry file contents and names encrypted with AES-256-GCM. Substrate and
+the S3 API see plain objects.
+
+- **Key:** `snapshots.key` becomes the Secret `orb-snapshots-key`, which only the gateway mounts.
+  gocryptfs keeps its master key in `encrypted/gocryptfs.conf`, encrypted with it. Without the key
+  the store can't be read; keep a copy outside the cluster. A wrong key stops the gateway, and its
+  log says `Password incorrect`.
+- **Costs:** mounting gocryptfs (FUSE) makes the gateway's container privileged and root. Its init
+  container downloads gocryptfs v2.7.0 from GitHub at every start and checks its SHA-256. On the
+  [Performance](#performance) machine, an orb holding 1 GiB still uploaded in 65 s and woke from
+  the NAS in 15.6 s, as fast as without encryption, and the store grew by 0.8%. While moving a
+  snapshot the gateway used about 0.7 CPU and filled its memory limit, mostly with page cache the
+  kernel frees; at 512 MiB it ran at the limit without being killed, so the limit is 1 GiB.
+- **Not covered:** the local copy of each snapshot on its node, under `/var/lib/ate`; use disk
+  encryption such as LUKS for that. Uploads from atelet to the gateway are plain HTTP inside the
+  cluster: between machines they cross your LAN unencrypted, unless K3s runs with
+  `--flannel-backend=wireguard-native`. K3s stores the key's Secret unencrypted in its datastore
+  on the server unless it runs with `--secrets-encryption`.
+
+An install from before encryption keeps its old store, unencrypted, in `data/` and `meta/` next to
+`encrypted/`. The gateway no longer reads them, so paused orbs whose snapshot is only there lose
+their state. Delete those two directories by hand.
 
 ### Snapshot timing
 
@@ -219,11 +252,12 @@ start again. Substrate's gVisor worker can also save process memory (`runsc chec
 as the snapshot is on the node's disk, while the upload to the gateway continues in the
 background, so a pause takes a few seconds instead of waiting for the upload.
 
-The provider has no setting for either, so the patch replaces two exact strings in its code,
-plus a third for the worker size, when the container starts. It refuses to start if a string is not found exactly once, so a chart
-that moves them fails loudly (the provider logs `k3s patch: found 0 times`) instead of silently
-running without it. Then remove the patch from `kustomization.yaml` and upgrade: orbs fall back
-to file-only snapshots. The chart's default is file-only, so memory snapshots are less tested.
+The provider has no setting for either, so the patch replaces two exact strings in its code, plus a
+third for the worker size, when the container starts. It refuses to start if a string is not found
+exactly once, so a chart that moves them fails loudly (the provider logs `k3s patch: found 0
+times`) instead of silently running without it. Then remove the patch from `kustomization.yaml` and
+upgrade: orbs fall back to file-only snapshots. The chart's default is file-only, so memory
+snapshots are less tested.
 
 Things to know:
 
@@ -285,4 +319,4 @@ kubectl delete role,rolebinding atenet-dns -n kube-system --ignore-not-found
 ```
 
 Deleting `ate-system` also deletes the gateway. With the default local volume, that deletes
-every paused orb; on an NFS share the files stay.
+every paused orb; on an NFS share the files stay, readable only with `snapshots.key`.
