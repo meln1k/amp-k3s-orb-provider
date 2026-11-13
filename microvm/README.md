@@ -68,6 +68,16 @@ GOTOOLCHAIN=go1.27.3 GOFLAGS= KO_DOCKER_REPO=ghcr.io/meln1k/substrate bin/ko bui
 # -> /tmp/ateworker@sha256:9f3dcecdb737c330db4479605f51be422c9b388e989dc5c1073cb56ffed77756
 ```
 
+The [`worker-image`](../.github/workflows/worker-image.yml) workflow runs this rebuild on every
+change to `microvm/` and weekly, fails if the result, the pin or the image on ghcr.io differ,
+and on `main` records a signed build attestation. To check it without rebuilding:
+
+```sh
+gh attestation verify \
+  oci://ghcr.io/meln1k/substrate/ateworker-microvm@sha256:9f3dcecdb737c330db4479605f51be422c9b388e989dc5c1073cb56ffed77756 \
+  --repo meln1k/amp-k3s-orb-provider
+```
+
 To use your own build, set `KO_DOCKER_REPO=ghcr.io/<you>/substrate` and drop `--push=false` and
 `--oci-layout-path`. The provider only accepts a digest-pinned `WORKER_IMAGE`, so put
 `<repo>@sha256:<digest>` in `provider-patch.yaml`. Either:
