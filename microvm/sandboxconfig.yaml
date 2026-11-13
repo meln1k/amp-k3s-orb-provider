@@ -1,0 +1,31 @@
+# EXPERIMENTAL. The microvm sandbox class: Kata guests on Cloud Hypervisor, from Substrate's
+# manifests/ate-install/sandboxconfig-microvm.yaml.tmpl at dc2bfeae (the commit Amp's chart
+# 0.20261109 runs). Kata 4.3.1 and Cloud Hypervisor v53.0, amd64 only. atelet fetches each file
+# through its object-store plugin from the in-cluster S3 gateway, where stage-assets.yaml puts
+# them, and checks the sha256.
+apiVersion: ate.dev/v1
+kind: SandboxConfig
+metadata:
+  name: microvm
+  annotations:
+    sandboxconfig.ate.dev/is-class-default: "true"
+spec:
+  sandboxClass: microvm
+  defaultVersion: v2
+  versions:
+  - name: v2
+    state: Enabled
+    assets:
+      amd64:
+        cloud-hypervisor:
+          url: "s3://amp-orbs/microvm-assets/amd64/448af3d4e59b22c2987f7df94c213ad40fb53a10d437e42b5ee6c4fce7c29ecc"
+          sha256: "448af3d4e59b22c2987f7df94c213ad40fb53a10d437e42b5ee6c4fce7c29ecc"
+        virtiofsd:
+          url: "s3://amp-orbs/microvm-assets/amd64/15b2e72a78cc08a9bd8a6943e89fb69c88cb3cbeb63069efceade835342ac7d4"
+          sha256: "15b2e72a78cc08a9bd8a6943e89fb69c88cb3cbeb63069efceade835342ac7d4"
+        kata-kernel:
+          url: "s3://amp-orbs/microvm-assets/amd64/f87d8359035cb7557b16a319e6431ea09b183e62268aef436bf8dc6530d786b6"
+          sha256: "f87d8359035cb7557b16a319e6431ea09b183e62268aef436bf8dc6530d786b6"
+        kata-image:
+          url: "s3://amp-orbs/microvm-assets/amd64/6770db2cca5710593f27c9ac5e1d9d7aab836422695a5e5c4807496a92a0f24d"
+          sha256: "6770db2cca5710593f27c9ac5e1d9d7aab836422695a5e5c4807496a92a0f24d"

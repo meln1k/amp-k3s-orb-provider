@@ -1,0 +1,45 @@
+# EXPERIMENTAL. Puts the four microVM guest files into the S3 gateway the way Substrate's
+# `ate-setup deploy` does (cmd/ate-setup/internal/steps/microvm.go): extract the kernel, guest
+# image and virtiofsd from the kata-static release, download the static cloud-hypervisor, check
+# each against the digests in sandboxconfig.yaml, and upload it under its digest.
+apiVersion: batch/v1
+kind: Job
+metadata: {name: microvm-assets, namespace: ate-system}
+spec:
+  backoffLimit: 5
+  ttlSecondsAfterFinished: 600
+  template:
+    spec:
+      restartPolicy: OnFailure
+      containers:
+      - name: stage
+        image: alpine:3.24.3@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a
+        env:
+        - {name: AWS_REGION, value: us-east-1}
+        - {name: AWS_ENDPOINT_URL, value: "http://versitygw.ate-system.svc:7070"}
+        - {name: AWS_ACCESS_KEY_ID, valueFrom: {secretKeyRef: {name: orb-snapshots-s3, key: AWS_ACCESS_KEY_ID}}}
+        - {name: AWS_SECRET_ACCESS_KEY, valueFrom: {secretKeyRef: {name: orb-snapshots-s3, key: AWS_SECRET_ACCESS_KEY}}}
+        command: [/bin/sh, -c]
+        args:
+        - |
+          set -eu
+          apk add --no-cache curl zstd tar aws-cli >/dev/null
+          cd /work
+          gh=https://github.com
+          curl -fsSL $gh/kata-containers/kata-containers/releases/download/4.3.1/kata-static-4.3.1-amd64.tar.zst |
+            zstd -dc | tar -x --wildcards '*opt/kata/share/kata-containers/*' '*opt/kata/libexec/virtiofsd'
+          curl -fsSLo cloud-hypervisor $gh/cloud-hypervisor/cloud-hypervisor/releases/download/v53.0/cloud-hypervisor-static
+          cp -L opt/kata/share/kata-containers/vmlinux.container vmlinux
+          cp -L opt/kata/share/kata-containers/kata-containers.img rootfs.img
+          cp -L opt/kata/libexec/virtiofsd virtiofsd
+          for f in cloud-hypervisor=448af3d4e59b22c2987f7df94c213ad40fb53a10d437e42b5ee6c4fce7c29ecc \
+                   virtiofsd=15b2e72a78cc08a9bd8a6943e89fb69c88cb3cbeb63069efceade835342ac7d4 \
+                   vmlinux=f87d8359035cb7557b16a319e6431ea09b183e62268aef436bf8dc6530d786b6 \
+                   rootfs.img=6770db2cca5710593f27c9ac5e1d9d7aab836422695a5e5c4807496a92a0f24d; do
+            name=${f%%=*} sum=${f#*=}
+            echo "$sum  $name" | sha256sum -c -
+            aws s3 cp --only-show-errors "$name" "s3://amp-orbs/microvm-assets/amd64/$sum"
+          done
+          echo staged
+        volumeMounts: [{name: work, mountPath: /work}]
+      volumes: [{name: work, emptyDir: {}}]
