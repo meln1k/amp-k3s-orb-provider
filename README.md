@@ -161,6 +161,9 @@ local-path volume under `/var/lib/rancher/k3s/storage` on whichever node runs th
 
 To keep them on a NAS, replace the `data` volume in `versitygw.yaml` with the commented `nfs`
 volume, and install `nfs-common` on every node. The gateway needs write access to the export.
+Also delete the `snapshots-data` PersistentVolumeClaim at the top of `versitygw.yaml`: nothing
+uses it then. On an existing install, the next upgrade then deletes the local volume and every
+paused orb stored in it.
 
 - **NFS 4.2** works as is: the gateway stores object metadata in extended attributes, which NFS
   supports from 4.2 on.
