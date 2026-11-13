@@ -11,6 +11,9 @@ secretGenerator:
     envs: [s3.env]
     options: {disableNameSuffixHash: true}
 patches:
+  # Memory snapshots: a paused orb keeps its running processes (see provider-patch.yaml).
+  - target: {kind: Deployment, name: amp-orb-provider, namespace: amp-orbs}
+    path: provider-patch.yaml
   # The chart's pre-install hook (ate-setup bootstrap) already applies this policy from the chart's
   # admission-policies/ without Helm ownership, so Helm 3 fails the install with "already exists"
   # when it creates the rendered copy. Leave the policy to the hook, which reapplies it on upgrade.

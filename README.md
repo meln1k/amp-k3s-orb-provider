@@ -6,9 +6,10 @@ machines), such as a homelab. This uses Amp's official
 mode. A Helm post-renderer fits it to K3s. Amp does not support this setup.
 
 How it works: one pod in the cluster connects out to ampcode.com and receives spawn, pause and
-resume jobs. Each orb runs as a gVisor sandbox pod on one of your nodes. A paused orb's files
-are saved to an S3 gateway (Versity) running in the cluster, so it can resume on any node. No
-inbound ports are needed.
+resume jobs. Each orb runs as a gVisor sandbox pod on one of your nodes. A paused orb's files and
+memory are saved on its node and uploaded to an S3 gateway (Versity) running in the cluster, so it
+can resume with its processes still running, on the same node in seconds or on any other node
+from the gateway. No inbound ports are needed.
 
 What the overlay changes in the chart:
 
@@ -18,7 +19,11 @@ What the overlay changes in the chart:
   instead of AWS. It stores each object as a plain file, so its data can live on a local disk or
   an NFS share on your NAS.
 - atelet: the EKS image credential provider is removed, so the public images are pulled
-  anonymously.
+  anonymously. Snapshot uploads get more time, and the local copy is kept for a day (see
+  [Snapshot timing](#snapshot-timing)).
+- Memory snapshots: the provider patches two settings in its own code at start, so a pause
+  saves process memory too and returns before the upload (see
+  [Memory snapshots](#memory-snapshots)).
 - The `sandboxconfig-assets` admission policy is left to the chart's pre-install hook, which
   already applies it. Without this, Helm 3 fails a fresh install with "already exists".
 
@@ -120,30 +125,30 @@ amp -ox "your first message" --orb-provider homelab --orb-size small
 
 To use the provider for every new thread, choose it under **Default Orb** in Settings → Orbs.
 
-To check that it works: run a command in the thread, wait until Amp shows the orb paused, then
-send another message and check that a file you created is still there. Pauses save files only,
-not memory, so processes such as dev servers start again after a resume.
+To check that it works: start a background process in the thread, such as a dev server, and
+create a file. Wait until Amp shows the orb paused, then send another message: the file is still
+there and the process is still running, with the same PID.
 
 ## Performance
 
-Measured on one 4-vCPU, 16 GB Hetzner machine (Ubuntu 24.04, K3s v1.37.2):
+Measured on one Intel N150 mini PC with 16 GB RAM, with snapshots on a UniFi UNAS 2 over gigabit
+NFSv3. Two `small` orbs each held 1 GiB of memory and a 200 MB file and were paused and resumed
+together:
 
 | | |
 | --- | --- |
-| Idle cluster RAM | about 1.9 GB |
-| Spawn on a warm `small` worker | 11 s |
-| First orb on a node (pulls the orb image once) | about 60 s |
-| Pause | 17 to 25 s |
-| Resume | 14 to 17 s |
+| Pause (snapshot written to the node's disk) | 3 to 5 s |
+| Upload to the NAS, in the background | about 95 s for both, one at a time |
+| Resume from the node's local copy | about 4 s |
+| Resume from the NAS | 34 to 40 s, both downloading at gigabit line rate |
+| Snapshot size | 1.6 GB on the node, 1.4 GB compressed on the NAS |
 
-Pause and resume time grows with what the orb writes. Each pause saves the orb's whole
-filesystem diff, zstd-compressed (about 8 s), and uploads it (about 10 s for 1.3 GiB).
-A repo whose `.agents/setup` installs system packages and `node_modules` came to 1.3 to 1.5 GiB
-per paused orb. Project snapshots are stored the same way. A resume on the node that paused the
-orb restores from a local copy in about 4 s; the rest is the orb reconnecting to Amp. A resume on
-another node downloads the snapshot first.
+Resume times run from the cluster receiving the job until the orb is ready. Amp takes another
+2 to 15 s to send the job. Processes, memory and files were intact after every resume.
 
-These numbers were measured with RustFS on a local disk, before the switch to Versity.
+On a 4-vCPU, 16 GB Hetzner machine, the idle cluster used about 1.9 GB of RAM, a spawn on a warm
+`small` worker took 11 s, and the first orb on a node took about 60 s, because it pulls the
+7 GiB orb image once.
 
 ## Sizing
 
@@ -171,7 +176,7 @@ volume, and install `nfs-common` on every node. The gateway needs write access t
   a `sync` export moved about 107 MB/s writing and 117 MB/s reading. Snapshot uploads reached
   only 25 to 30 MB/s each: a node uploads one snapshot at a time, and the gateway assembles each
   multipart upload by copying its parts into a new file, which over NFSv3 reads them back across
-  the network (about 35 s for a 2 GB memory image). Downloads run in parallel at line rate.
+  the network (about 20 s for a 1.1 GB memory image). Downloads run in parallel at line rate.
 
 ### Snapshot timing
 
@@ -189,13 +194,35 @@ The overlay changes two atelet defaults for a homelab store:
   orb, and atelet does not delete them early when the disk fills, so lower the delay on nodes
   with little free disk.
 
-## Experimental: microVM orbs with memory snapshots
+## Memory snapshots
 
-[`microvm/`](microvm/README.md) runs orbs as Kata/Cloud Hypervisor microVMs instead of gVisor.
-Paused orbs keep their running processes, a pause takes about a second and a wake about two.
-It needs `/dev/kvm` on every orb node, uses a worker image built reproducibly from Substrate's
-source, patches Amp's provider at start, and Docker does not work inside these orbs yet. It is
-off by default.
+Amp's provider asks for file-only snapshots: a resumed orb keeps its files, but its processes
+start again. Substrate's gVisor worker can also save process memory (`runsc checkpoint`), and
+[`provider-patch.yaml`](provider-patch.yaml) turns that on. It also makes a pause return as soon
+as the snapshot is on the node's disk, while the upload to the gateway continues in the
+background, so a pause takes a few seconds instead of waiting for the upload.
+
+The provider has no setting for either, so the patch replaces two exact strings in its code
+when the container starts. It refuses to start if a string is not found exactly once, so a chart
+that moves them fails loudly (the provider logs `k3s patch: found 0 times`) instead of silently
+running without it. Then remove the patch from `kustomization.yaml` and upgrade: orbs fall back
+to file-only snapshots.
+
+Things to know:
+
+- **Docker inside an orb:** containers that were running keep running across a pause, but the
+  `docker0` bridge is gone after a restore. New containers on the default bridge network fail with
+  "Device does not exist"; `--network host` works. Restarting dockerd brings the bridge back but
+  stops the running containers.
+- **Runtime changes:** a memory snapshot only restores on a worker with the same gVisor build and
+  compatible CPU features. When none matches, such as after a chart upgrade that changes the
+  gVisor worker, Substrate's code restores the orb's files without its memory, but an orb whose
+  snapshot is still on its node first tries to move to a matching node. This has not been tested
+  here: after such an upgrade, resume a test orb before relying on it.
+- **Snapshot size:** a snapshot holds the memory the orb uses as well as its file changes. An orb
+  holding 1 GiB came to 1.6 GB on the node and 1.4 GB compressed in the store. Size the node's
+  disk for the local copies and the store for the uploads.
+- The chart's default is file-only snapshots, so this path is less tested than the default.
 
 ## Troubleshoot
 
@@ -226,9 +253,10 @@ helm upgrade orb-provider oci://us-central1-docker.pkg.dev/amp-prod-0/orb-provid
 ```
 
 If a new chart moves the atelet credential-provider args, the `test` ops fail the render instead
-of silently installing something broken. Before upgrading, read `changelog.md` in Amp's
-[install bundle](https://ampcode.com/docs/orbs/self-hosted/bundle.zip) for releases that need a
-manual step.
+of silently installing something broken. If it moves the strings `provider-patch.yaml` replaces,
+the provider fails to start; see [Memory snapshots](#memory-snapshots). Before upgrading, read
+`changelog.md` in Amp's [install bundle](https://ampcode.com/docs/orbs/self-hosted/bundle.zip)
+for releases that need a manual step.
 
 ## Uninstall
 
