@@ -1,5 +1,5 @@
-# Memory snapshots and worker size (see README): the provider container patches three strings in
-# its own bundle at start and refuses to start unless each is found exactly once.
+# Memory snapshots, worker size and earlyoom (see README): the provider container patches four
+# strings in its own bundle at start and refuses to start unless each is found exactly once.
 - {op: test, path: /spec/template/spec/initContainers/2/name, value: provider}
 - {op: add, path: /spec/template/spec/volumes/-, value: {name: provider-patched, emptyDir: {}}}
 - {op: add, path: /spec/template/spec/initContainers/2/volumeMounts/-, value: {name: provider-patched, mountPath: /opt/amp-orb-provider-patched}}
@@ -12,6 +12,22 @@
   - |
     import {cpSync, readFileSync, writeFileSync} from 'node:fs'
     const src = '/opt/amp-orb-provider', dst = '/opt/amp-orb-provider-patched'
+    // Runs before orbd in every new orb, then hands PID 1 to orbd. gVisor has no OOM killer, so
+    // earlyoom stops the largest process while 10% of the orb's memory is still free; every
+    // oom_score is 0 under gVisor, so --avoid keeps Amp's and Docker's daemons out of its choice.
+    // The orb image has the package available but not installed; the loops retry until apt works
+    // and restart earlyoom if it exits. A woken orb keeps both running from its memory snapshot.
+    const earlyoom = [
+      '(',
+      '  while ! command -v earlyoom >/dev/null; do',
+      '    DEBIAN_FRONTEND=noninteractive apt-get install -y -q -o DPkg::Lock::Timeout=60 earlyoom ||',
+      '      { apt-get update -q && DEBIAN_FRONTEND=noninteractive apt-get install -y -q -o DPkg::Lock::Timeout=60 earlyoom; } ||',
+      '      sleep 10',
+      '  done',
+      "  while :; do earlyoom -m 10 -r 3600 --avoid '^(orbd|amp|dockerd|containerd)$'; sleep 5; done",
+      ') >>/var/log/earlyoom.log 2>&1 </dev/null &',
+      'exec /opt/orbd/orbd',
+    ].join('\n')
     const patches = [
       // Pauses save process memory too, so processes keep running after a resume.
       ['preferredFidelity:"SNAPSHOT_FIDELITY_ROOTFS"', 'preferredFidelity:"SNAPSHOT_FIDELITY_MEMORY"'],
@@ -19,12 +35,14 @@
       ['{durable:"DURABILITY_MODE_SYNCHRONOUS",', '{durable:"DURABILITY_MODE_ASYNCHRONOUS",'],
       // Worker pods get the orb's memory plus 128 MiB instead of plus 1 GiB.
       ['`${i.memoryGi+1}Gi`', '`${i.memoryGi*1024+128}Mi`'],
+      // Orbs start earlyoom, then orbd.
+      ['command:["/opt/orbd/orbd"]', `command:${JSON.stringify(['/bin/sh', '-c', earlyoom])}`],
     ]
     let js = readFileSync(`${src}/main.js`, 'utf8')
     for (const [from, to] of patches) {
       const n = js.split(from).length - 1
       if (n !== 1) { console.error(`k3s patch: found ${n} times, expected 1: ${from}`); process.exit(1) }
-      js = js.replace(from, to)
+      js = js.replace(from, () => to) // a function, so `$'` and the like in `to` stay literal
     }
     cpSync(src, dst, {recursive: true})
     writeFileSync(`${dst}/main.js`, js)

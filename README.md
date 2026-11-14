@@ -29,6 +29,8 @@ What the overlay changes in the chart:
   [Memory snapshots](#memory-snapshots)).
 - Worker size: the same patch gives each orb's worker pod its memory plus 128 MiB instead of
   plus 1 GiB (see [Sizing](#sizing)).
+- earlyoom: the same patch starts earlyoom in every orb, so a runaway process is stopped
+  before the orb runs out of memory (see [Running out of memory](#running-out-of-memory)).
 
 The control plane requests about 1.7 CPU and 0.5 GiB of memory less than the chart's default,
 for about 0.8 CPU and 2.2 GiB in total, and 5 GiB of disk plus the snapshot store instead of
@@ -187,37 +189,25 @@ the [Performance](#performance) test, an orb holding 1 GiB took about 2 × 1.4 G
 ### Running out of memory
 
 gVisor has no OOM killer, and Amp does nothing about memory in self-hosted orbs: it showed no
-warning and stopped nothing with an orb at 88% of its memory. So one process that grows too far
-takes the whole orb with it: the worker kills the sandbox, and the provider deletes the orb with
-its snapshots. Uncommitted and unpushed work in it is lost.
+warning and stopped nothing with an orb at 88% of its memory. Without help, one process that grows
+too far takes the whole orb with it: the worker kills the sandbox, and the provider deletes the
+orb with its snapshots, so uncommitted and unpushed work in it is lost.
 
-[earlyoom](https://github.com/rfjakob/earlyoom) kills the largest process first, while 10% of
-the orb's memory is still free. To run it in every orb, a workspace admin pastes this into
-workspace settings → Orbs → Advanced → **Resume Script**. Amp runs it on each orb's first start
-and after every wake; it installs earlyoom in the background, so it stays within the script's
-10 s limit, and exits at once on orbs that aren't gVisor and in woken orbs, where earlyoom is
-still running from the snapshot.
+So [`provider-patch.yaml`](provider-patch.yaml) starts every new orb with a short shell wrapper
+instead of Amp's `orbd` directly. The wrapper installs Debian's
+[earlyoom](https://github.com/rfjakob/earlyoom) in the background, retrying until apt works,
+runs it as `earlyoom -m 10 -r 3600 --avoid '^(orbd|amp|dockerd|containerd)$'` and restarts it if
+it exits, then hands PID 1 to `orbd`. earlyoom stops the largest process while 10% of the orb's
+memory is still free. Every `oom_score` is 0 under gVisor, so it picks by size alone, and
+`--avoid` keeps Amp's own processes and Docker's daemons out of that choice. It logs to
+`/var/log/earlyoom.log` in the orb. A woken orb keeps earlyoom running from its memory snapshot.
 
-```bash
-#!/usr/bin/env bash
-set -u
-case "$(uname -r)" in *gvisor*) ;; *) exit 0 ;; esac
-pgrep -x earlyoom >/dev/null && exit 0
-(
-	command -v earlyoom >/dev/null ||
-		sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q earlyoom >/dev/null ||
-		{ sudo apt-get update -q >/dev/null && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q earlyoom >/dev/null; }
-	# Every oom_score is 0 under gVisor, so earlyoom picks the process with the most memory.
-	# --avoid keeps Amp's own processes and Docker's daemons out of that choice.
-	amp orb service start earlyoom --command "earlyoom -m 10 -r 3600 --avoid '^(orbd|amp|dockerd|containerd)$'"
-) >>/home/user/.cache/amp/logs/earlyoom-setup.log 2>&1 &
-```
-
-On the [Performance](#performance) machine, earlyoom was running 4 s after a new `small` orb
-started. It stopped a process growing 128 MiB/s when 353 MiB was free, and the orb's other
-processes, Amp's agent included, kept running; the sandbox stayed 249 MiB under its limit. It did
-the same after the orb was paused and woken. An orb is unprotected for those first seconds, and
-earlyoom picks only by size, so a large build or test run can still be the one it stops.
+On the [Performance](#performance) machine, earlyoom was running 5 s after a new `small` orb
+booted. It stopped a process growing 128 MiB/s when 350 MiB was free, and the orb's other
+processes, Amp's agent included, kept running; in an earlier run the sandbox stayed 249 MiB under
+its limit. It did the same after the orb was paused and woken. An orb is unprotected for those
+first seconds, and because earlyoom picks only by size, a large build or test run can still be the
+one it stops. Orbs created before the patch keep their old setup until they are recreated.
 
 ### Snapshot store
 
@@ -289,11 +279,11 @@ as the snapshot is on the node's disk, while the upload to the gateway continues
 background, so a pause takes a few seconds instead of waiting for the upload.
 
 The provider has no setting for either, so the patch replaces two exact strings in its code, plus a
-third for the worker size, when the container starts. It refuses to start if a string is not found
-exactly once, so a chart that moves them fails loudly (the provider logs `k3s patch: found 0
-times`) instead of silently running without it. Then remove the patch from `kustomization.yaml` and
-upgrade: orbs fall back to file-only snapshots. The chart's default is file-only, so memory
-snapshots are less tested.
+third for the worker size and a fourth for earlyoom, when the container starts. It refuses to start
+if a string is not found exactly once, so a chart that moves them fails loudly (the provider logs
+`k3s patch: found 0 times`) instead of silently running without it. Then remove the patch from
+`kustomization.yaml` and upgrade: orbs fall back to file-only snapshots and run without earlyoom.
+The chart's default is file-only, so memory snapshots are less tested.
 
 Things to know:
 
