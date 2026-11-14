@@ -176,12 +176,48 @@ to what the orb leaves unused, so the pod stays under its limit with any extra o
 The rest only lets a pause write faster. On the [Performance](#performance) machine at plus
 128 MiB, `small` orbs holding over 3 GiB came within 44 MiB of the pod's limit while pausing, and
 no pod reached it. An orb that goes over its own memory is killed at any extra, and Amp's
-provider then deletes it with its snapshots, so give orbs a size with room to spare.
+provider then deletes it with its snapshots, so give orbs a size with room to spare and see
+[Running out of memory](#running-out-of-memory).
 
 A paused orb's snapshot holds the memory it uses as well as its file changes. Each paused orb
 keeps its latest snapshot on its node for a day (see [Snapshot timing](#snapshot-timing)) and
 its two newest in the snapshot store: a pause deletes the snapshot before the previous one. On
 the [Performance](#performance) test, an orb holding 1 GiB took about 2 × 1.4 GB in the store.
+
+### Running out of memory
+
+gVisor has no OOM killer, and Amp does nothing about memory in self-hosted orbs: it showed no
+warning and stopped nothing with an orb at 88% of its memory. So one process that grows too far
+takes the whole orb with it: the worker kills the sandbox, and the provider deletes the orb with
+its snapshots. Uncommitted and unpushed work in it is lost.
+
+[earlyoom](https://github.com/rfjakob/earlyoom) kills the largest process first, while 10% of
+the orb's memory is still free. To run it in every orb, a workspace admin pastes this into
+workspace settings → Orbs → Advanced → **Resume Script**. Amp runs it on each orb's first start
+and after every wake; it installs earlyoom in the background, so it stays within the script's
+10 s limit, and exits at once on orbs that aren't gVisor and in woken orbs, where earlyoom is
+still running from the snapshot.
+
+```bash
+#!/usr/bin/env bash
+set -u
+case "$(uname -r)" in *gvisor*) ;; *) exit 0 ;; esac
+pgrep -x earlyoom >/dev/null && exit 0
+(
+	command -v earlyoom >/dev/null ||
+		sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q earlyoom >/dev/null ||
+		{ sudo apt-get update -q >/dev/null && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q earlyoom >/dev/null; }
+	# Every oom_score is 0 under gVisor, so earlyoom picks the process with the most memory.
+	# --avoid keeps Amp's own processes and Docker's daemons out of that choice.
+	amp orb service start earlyoom --command "earlyoom -m 10 -r 3600 --avoid '^(orbd|amp|dockerd|containerd)$'"
+) >>/home/user/.cache/amp/logs/earlyoom-setup.log 2>&1 &
+```
+
+On the [Performance](#performance) machine, earlyoom was running 4 s after a new `small` orb
+started. It stopped a process growing 128 MiB/s when 353 MiB was free, and the orb's other
+processes, Amp's agent included, kept running; the sandbox stayed 249 MiB under its limit. It did
+the same after the orb was paused and woken. An orb is unprotected for those first seconds, and
+earlyoom picks only by size, so a large build or test run can still be the one it stops.
 
 ### Snapshot store
 
