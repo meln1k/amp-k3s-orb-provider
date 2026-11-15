@@ -28,13 +28,17 @@ What the overlay changes in the chart:
   saves process memory too and returns before the upload (see
   [Memory snapshots](#memory-snapshots)).
 - Worker size: the same patch gives each orb's worker pod its memory plus 128 MiB instead of
-  plus 1 GiB (see [Sizing](#sizing)).
+  plus 1 GiB, and has it request 750m CPU instead of 1 CPU (see [Sizing](#sizing)).
+- CPU under load: Substrate's containers that request no CPU get small requests (350m in total),
+  and the provider's probes get 10 s instead of 1 s, so busy orbs do not starve the control plane
+  or get the provider restarted.
+- Warm workers: one idle `tiny` worker instead of one `small`, and no extra workers to fill a
+  node's free room.
 - earlyoom: the same patch starts earlyoom in every orb, so a runaway process is stopped
   before the orb runs out of memory (see [Running out of memory](#running-out-of-memory)).
 
-The control plane requests about 1.7 CPU and 0.5 GiB of memory less than the chart's default,
-for about 0.8 CPU and 2.2 GiB in total, and 5 GiB of disk plus the snapshot store instead of
-500 GiB.
+With K3s's own pods, the control plane requests about 1.35 CPU and 2.4 GiB of memory, and 5 GiB
+of disk plus the snapshot store instead of 500 GiB.
 
 ## 1. Create the provider in Amp
 
@@ -167,10 +171,22 @@ image.
 
 ## Sizing
 
-Each running orb reserves `memoryGi` plus 128 MiB on a node, and a `small` orb requests 1 CPU.
-For example, a 64 GiB machine with enough CPUs fits about seven `medium` (8 GiB) orbs or fourteen
-`small` (4 GiB) orbs next to the control plane. Each orb also uses disk on its node: the 7 GiB
-orb image once per node, plus whatever the orb writes.
+Each running orb reserves `memoryGi` plus 128 MiB on a node and requests 750m CPU at any size;
+its type's CPU is only its limit. A node fits as many orbs as both allow: a 64 GiB machine with
+12 cores fits about seven `medium` (8 GiB) orbs or fourteen `small` (4 GiB) orbs next to the
+control plane. Each orb also uses disk on its node: the 7 GiB orb image once per node, plus
+whatever the orb writes.
+
+The CPU request decides how many busy orbs share the cores, because K3s reserves no CPU for the
+host by default. On the [Performance](#performance) machine (4 cores), 750m fits three `tiny`
+orbs. Three orbs running a CPU and file-writing loop together left about a quarter of the CPU
+idle. At 250m, six fit and kept the CPU saturated: their jobs ran 4 to 7 times slower, the
+provider's probes timed out and the kubelet restarted it, spawns took up to 94 s, and orbs'
+outbound connections timed out.
+
+An orb holds its worker until it pauses, at least 5 minutes after its agent goes idle. A spawn
+that finds no free worker waits about 9.5 minutes for one, then fails, and Amp retries it. So
+when more orbs start at once than fit, expect some to fail once before they run.
 
 The chart gives each worker pod 1 GiB on top of the orb's memory. The worker keeps only 64 MiB of
 that for itself, kills an orb that stays over its own `memoryGi`, and limits a pause's page cache

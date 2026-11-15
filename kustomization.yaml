@@ -45,6 +45,33 @@ patches:
             initContainers:
             - name: podcert-agent
               securityContext: {runAsUser: 0}
+  # These containers request no CPU, so when busy orbs fill the node's CPU they get almost none of
+  # it, and spawns, the API and orbs' egress time out. Requests give them a share (350m in total).
+  - patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata: {name: ate-api-server, namespace: ate-system}
+      spec: {template: {spec: {containers: [{name: ate-api-server, resources: {requests: {cpu: 100m}}}]}}}
+  - patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata: {name: atenet-router, namespace: ate-system}
+      spec: {template: {spec: {containers: [{name: atenet-router, resources: {requests: {cpu: 50m}}}, {name: envoy, resources: {requests: {cpu: 50m}}}]}}}
+  - patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata: {name: atenet-egress, namespace: ate-system}
+      spec: {template: {spec: {containers: [{name: envoy, resources: {requests: {cpu: 50m}}}, {name: ext-proc, resources: {requests: {cpu: 50m}}}]}}}
+  - patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata: {name: ate-controller, namespace: ate-system}
+      spec: {template: {spec: {containers: [{name: ate-controller, resources: {requests: {cpu: 25m}}}]}}}
+  - patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata: {name: ate-idp-server, namespace: ate-system}
+      spec: {template: {spec: {containers: [{name: ate-idp-server, resources: {requests: {cpu: 25m}}}]}}}
   # atelet: K3s nodes have no EKS image credential provider, so drop its args and host mounts (as
   # Substrate's kind overlay does) and pull the public images anonymously. Then the snapshot
   # upload limit and the local copy's lifetime (see README, Snapshot timing).
