@@ -252,6 +252,19 @@ For a UniFi UNAS: enable NFS in UniFi Drive > Settings > Services, create a shar
 leave it in the default Collaborative (all squash) mode. Its export path is
 `/var/nfs/shared/<Shared_Drive_Name>`.
 
+**Outages of the store can delete orbs.** When a wake has no local copy (see
+[Snapshot timing](#snapshot-timing)), atelet downloads the snapshot from the gateway. If that
+download fails, Substrate marks the orb crashed, and the provider deletes it together with every
+snapshot it has in the store; Amp then gives the thread a new, empty orb. With the plugin's default
+of 3 attempts, a 60 s gateway outage during two such wakes deleted both orbs. The overlay therefore
+gives atelet's objectstore plugin 20 attempts (`AWS_MAX_ATTEMPTS`), and the same outage then only
+delayed the wake by about 95 s. The NFS mount is `hard`, so while the NAS restarts, the gateway's
+reads wait rather than fail; its liveness check only restarts it after 5 minutes of failures, so
+that a NAS restart does not drop the downloads in flight. An outage that outlasts the retries can
+still delete orbs that wake during it, so schedule NAS updates and restarts for when nobody uses
+Amp. Wakes from a local copy do not read the store. A pause during an outage takes about 1.5
+minutes longer and leaves the snapshot it replaces in the store until the orb is deleted.
+
 ### Snapshot encryption
 
 A paused orb's snapshot holds its memory, which can include tokens and other secrets. The gateway

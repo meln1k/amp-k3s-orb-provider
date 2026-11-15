@@ -81,6 +81,10 @@ patches:
       - {op: test, path: /spec/template/spec/initContainers/1/name, value: objectstore-plugin}
       - {op: test, path: /spec/template/spec/initContainers/1/resources/requests/cpu, value: 50m}
       - {op: replace, path: /spec/template/spec/initContainers/1/resources/requests/cpu, value: 100m}
+      # The plugin gives up on a snapshot download after the AWS SDK's default 3 attempts (about
+      # 6 s), and a failed restore marks the orb crashed, which the provider then deletes with its
+      # snapshots. 20 attempts, backing off up to 20 s each, outlast a gateway or NAS restart.
+      - {op: add, path: /spec/template/spec/initContainers/1/env/-, value: {name: AWS_MAX_ATTEMPTS, value: "20"}}
       - {op: test, path: /spec/template/spec/containers/0/name, value: atelet}
       - {op: test, path: /spec/template/spec/containers/0/args/0, value: "--image-credential-provider-config=/run/image-credential-provider/config.yaml"}
       - {op: test, path: /spec/template/spec/containers/0/args/1, value: "--image-credential-provider-bin-dir=/run/image-credential-provider/bin"}

@@ -60,8 +60,10 @@ spec:
         - {name: ROOT_ACCESS_KEY_ID, valueFrom: {secretKeyRef: {name: orb-snapshots-s3, key: AWS_ACCESS_KEY_ID}}}
         - {name: ROOT_SECRET_ACCESS_KEY, valueFrom: {secretKeyRef: {name: orb-snapshots-s3, key: AWS_SECRET_ACCESS_KEY}}}
         readinessProbe: {tcpSocket: {port: api}, periodSeconds: 5}
-        # Restart the container if gocryptfs exits, which leaves /plain unreadable.
-        livenessProbe: {exec: {command: [test, -d, /plain/data/amp-orbs]}, periodSeconds: 10}
+        # Restart the container if gocryptfs exits, which leaves /plain unreadable. The NFS mount is
+        # hard, so while the NAS restarts the check hangs and requests wait; restarting the gateway
+        # then would drop them, so it has to fail for 5 minutes first.
+        livenessProbe: {exec: {command: [test, -d, /plain/data/amp-orbs]}, periodSeconds: 10, timeoutSeconds: 10, failureThreshold: 30}
         # A real CPU request: on a node busy with orbs, at 50m it took minutes to assemble each
         # uploaded memory image, and uploads ran past their deadline.
         resources: {requests: {cpu: 250m, memory: 64Mi}, limits: {memory: 1Gi}}
