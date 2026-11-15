@@ -74,9 +74,13 @@ patches:
       spec: {template: {spec: {containers: [{name: ate-idp-server, resources: {requests: {cpu: 25m}}}]}}}
   # atelet: K3s nodes have no EKS image credential provider, so drop its args and host mounts (as
   # Substrate's kind overlay does) and pull the public images anonymously. Then the snapshot
-  # upload limit and the local copy's lifetime (see README, Snapshot timing).
+  # upload limit and the local copy's lifetime (see README, Snapshot timing). The objectstore
+  # plugin compresses uploads and decompresses downloads, so it gets a CPU share for busy nodes.
   - target: {kind: DaemonSet, name: atelet, namespace: ate-system}
     patch: |-
+      - {op: test, path: /spec/template/spec/initContainers/1/name, value: objectstore-plugin}
+      - {op: test, path: /spec/template/spec/initContainers/1/resources/requests/cpu, value: 50m}
+      - {op: replace, path: /spec/template/spec/initContainers/1/resources/requests/cpu, value: 100m}
       - {op: test, path: /spec/template/spec/containers/0/name, value: atelet}
       - {op: test, path: /spec/template/spec/containers/0/args/0, value: "--image-credential-provider-config=/run/image-credential-provider/config.yaml"}
       - {op: test, path: /spec/template/spec/containers/0/args/1, value: "--image-credential-provider-bin-dir=/run/image-credential-provider/bin"}
@@ -91,7 +95,10 @@ patches:
       - {op: remove, path: /spec/template/spec/volumes/5}
       - {op: remove, path: /spec/template/spec/volumes/4}
       - {op: add, path: /spec/template/spec/containers/0/args/-, value: "--snapshot-upload-timeout=3m"}
-      - {op: add, path: /spec/template/spec/containers/0/args/-, value: "--snapshot-upload-est-throughput-mib=20"}
+      - {op: add, path: /spec/template/spec/containers/0/args/-, value: "--snapshot-upload-est-throughput-mib=5"}
+      # One upload at a time: uploads share the plugin's 512 MiB buffer budget, and a second one
+      # waits there on the clock, behind the first one's memory image, until its deadline passes.
+      - {op: add, path: /spec/template/spec/containers/0/args/-, value: "--snapshot-upload-workers=1"}
       - {op: add, path: /spec/template/spec/containers/0/args/-, value: "--snapshot-detach-delay=24h"}
   # Snapshots go to the in-cluster S3 gateway (versitygw.yaml) instead of AWS S3.
   - target: {kind: DaemonSet|Deployment, name: atelet|ate-api-server, namespace: ate-system}

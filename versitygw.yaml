@@ -62,7 +62,9 @@ spec:
         readinessProbe: {tcpSocket: {port: api}, periodSeconds: 5}
         # Restart the container if gocryptfs exits, which leaves /plain unreadable.
         livenessProbe: {exec: {command: [test, -d, /plain/data/amp-orbs]}, periodSeconds: 10}
-        resources: {requests: {cpu: 50m, memory: 64Mi}, limits: {memory: 1Gi}}
+        # A real CPU request: on a node busy with orbs, at 50m it took minutes to assemble each
+        # uploaded memory image, and uploads ran past their deadline.
+        resources: {requests: {cpu: 250m, memory: 64Mi}, limits: {memory: 1Gi}}
         volumeMounts:
         - {name: data, mountPath: /cipher, subPath: encrypted}
         - {name: tools, mountPath: /tools, readOnly: true}

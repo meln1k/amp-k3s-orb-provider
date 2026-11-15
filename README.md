@@ -22,22 +22,23 @@ What the overlay changes in the chart:
   an NFS export on your NAS (see [Snapshot store](#snapshot-store) and
   [Snapshot encryption](#snapshot-encryption)).
 - atelet: the EKS image credential provider is removed, so the public images are pulled
-  anonymously. Snapshot uploads get more time, and the local copy is kept for a day (see
-  [Snapshot timing](#snapshot-timing)).
+  anonymously. Snapshot uploads run one at a time with more time each, and the local copy is
+  kept for a day (see [Snapshot timing](#snapshot-timing)).
 - Memory snapshots: the provider patches two settings in its own code at start, so a pause
   saves process memory too and returns before the upload (see
   [Memory snapshots](#memory-snapshots)).
 - Worker size: the same patch gives each orb's worker pod its memory plus 128 MiB instead of
   plus 1 GiB, and has it request 750m CPU instead of 1 CPU (see [Sizing](#sizing)).
 - CPU under load: Substrate's containers that request no CPU get small requests (350m in total),
-  and the provider's probes get 10 s instead of 1 s, so busy orbs do not starve the control plane
-  or get the provider restarted.
+  the snapshot gateway requests 250m and atelet's objectstore plugin 100m, and the provider's
+  probes get 10 s instead of 1 s, so busy orbs do not starve the control plane, stall snapshot
+  uploads or get the provider restarted.
 - Warm workers: one idle `tiny` worker instead of one `small`, and no extra workers to fill a
   node's free room.
 - earlyoom: the same patch starts earlyoom in every orb, so a runaway process is stopped
   before the orb runs out of memory (see [Running out of memory](#running-out-of-memory)).
 
-With K3s's own pods, the control plane requests about 1.35 CPU and 2.4 GiB of memory, and 5 GiB
+With K3s's own pods, the control plane requests about 1.6 CPU and 2.4 GiB of memory, and 5 GiB
 of disk plus the snapshot store instead of 500 GiB.
 
 ## 1. Create the provider in Amp
@@ -184,9 +185,17 @@ idle. At 250m, six fit and kept the CPU saturated: their jobs ran 4 to 7 times s
 provider's probes timed out and the kubelet restarted it, spawns took up to 94 s, and orbs'
 outbound connections timed out.
 
+CPU sharing also decides how fast real work runs. On the same machine, three `tiny` orbs looping
+`npm ci`, `tsc`, ESLint, tests and a `docker build` took 2.2 to 4.4 times as long per step as one
+orb alone, and two took about 1.5 times as long. A `tiny` orb also sat at its 2 GiB limit during
+builds, and earlyoom killed `tsc` once. For builds, use `small` and plan on about two busy orbs per
+4 cores.
+
 An orb holds its worker until it pauses, at least 5 minutes after its agent goes idle. A spawn
 that finds no free worker waits about 9.5 minutes for one, then fails, and Amp retries it. So
-when more orbs start at once than fit, expect some to fail once before they run.
+when more orbs start at once than fit, expect some to fail once before they run. After orbs
+pause, the provider waits 10 minutes before it shrinks the pool back to its warm workers, so
+their idle workers keep their CPU and memory requests until then.
 
 The chart gives each worker pod 1 GiB on top of the orb's memory. The worker keeps only 64 MiB of
 that for itself, kills an orb that stays over its own `memoryGi`, and limits a pause's page cache
@@ -273,12 +282,20 @@ their state. Delete those two directories by hand.
 ### Snapshot timing
 
 Each pause writes the snapshot to the node's disk first, then atelet uploads it to the gateway.
-The overlay changes two atelet defaults for a homelab store:
+The overlay changes these atelet defaults for a homelab store:
 
 - **Upload time limit:** atelet cancels and retries an upload after `--snapshot-upload-timeout`
-  plus the snapshot's size at `--snapshot-upload-est-throughput-mib`. The defaults (2m, 100 MiB/s)
-  cut off two 2 GB snapshots uploading together to a NAS; the overlay sets 3m and 20 MiB/s,
-  about 5 minutes for a 2.3 GB snapshot.
+  plus the data it holds in the upload buffer at `--snapshot-upload-est-throughput-mib`, and
+  doubles the limit after each failure. The defaults (2m, 100 MiB/s) cut off two 2 GB snapshots
+  uploading together to a NAS; the overlay sets 3m and 5 MiB/s, so a 416 MiB memory image gets
+  about 4.4 minutes.
+- **One upload at a time:** `--snapshot-upload-workers=1`. Uploads share the objectstore
+  plugin's 512 MiB buffer, and an upload waiting there for room counts that wait against its
+  limit. With three busy `tiny` orbs, two uploads failed three times each that way and finished
+  57 minutes after their pause. With one worker, the next upload waits in atelet's queue instead.
+  The gateway also requests 250m CPU: at 50m on a busy node it took up to 7 minutes to assemble
+  one memory image. With both changes, three orbs paused together on a busy node uploaded one
+  after another in 19, 22 and 52 s, each on its first try.
 - **Local copy:** atelet keeps the latest snapshot on the node for `--snapshot-detach-delay`
   (default 30m, here 24h). Until then a wake restores from that copy without touching the store,
   and the orb is pinned to that node; if the node is full, the orb moves to another node and
