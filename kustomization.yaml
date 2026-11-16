@@ -17,6 +17,9 @@ secretGenerator:
     namespace: ate-system
     files: [snapshots.key]
     options: {disableNameSuffixHash: true}
+# A server much bigger than the agents: run the shared services on it (see README, Sizing).
+# components:
+#   - server-node
 replicas:
   - {name: ate-api-server, count: 1}
   - {name: ate-idp-server, count: 1}

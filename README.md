@@ -211,6 +211,36 @@ keeps its latest snapshot on its node for a day (see [Snapshot timing](#snapshot
 its two newest in the snapshot store: a pause deletes the snapshot before the previous one. On
 the [Performance](#performance) test, an orb holding 1 GiB took about 2 × 1.4 GB in the store.
 
+### A bigger server
+
+When the K3s server is much bigger than the agents, run the shared services on it so the agents'
+CPU goes to orbs: uncomment `server-node` under `components` in `kustomization.yaml` and upgrade.
+That component makes the Deployments and Postgres prefer nodes labelled
+`node-role.kubernetes.io/control-plane` (K3s's servers), and raises the snapshot gateway's CPU
+request from 250m to 1 CPU: in a wake of three orbs from the NAS it used about 1 core, and the
+node ran out of CPU. atelet and its objectstore plugin still run on every node, because they
+handle that node's own orbs. Postgres keeps its local volume on the node it first ran on, so on
+an existing cluster it stays where it is.
+
+Reserve some of the server for K3s and the host, in `/etc/rancher/k3s/config.yaml` before
+installing K3s (or followed by `systemctl restart k3s`):
+
+```yaml
+disable: [traefik, servicelb]
+node-ip: 192.168.1.10 # the server's LAN IPv4 address; see below
+kubelet-arg:
+  - kube-reserved=cpu=500m,memory=512Mi
+  - system-reserved=cpu=500m,memory=512Mi
+```
+
+Set `node-ip` on every node, agents included, to its LAN IPv4 address. Otherwise K3s also records
+the node's IPv6 address, and when the router hands out a new IPv6 prefix, K3s exits on its next
+start ("NodeIPs changed for the node") before systemd restarts it.
+
+On a server with 8 cores, 16 threads and 24 GB, memory runs out first: after the reservation and
+the control plane, about 4 `small` or 9 `tiny` orbs fit. Those orbs can use at most 8 or 9
+threads between them, so the shared services keep the rest even when every orb is busy.
+
 ### Running out of memory
 
 gVisor has no OOM killer, and Amp does nothing about memory in self-hosted orbs: it showed no
