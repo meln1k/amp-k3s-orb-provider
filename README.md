@@ -358,8 +358,27 @@ The provider has no setting for either, so the patch replaces two exact strings 
 third for the worker size and a fourth for earlyoom, when the container starts. It refuses to start
 if a string is not found exactly once, so a chart that moves them fails loudly (the provider logs
 `k3s patch: found 0 times`) instead of silently running without it. Then remove the patch from
-`kustomization.yaml` and upgrade: orbs fall back to file-only snapshots and run without earlyoom.
+`kustomization.yaml` and upgrade: new orbs take file-only snapshots and run without earlyoom.
 The chart's default is file-only, so memory snapshots are less tested.
+
+To use file-only snapshots and keep the other patches, delete the `SNAPSHOT_FIDELITY_MEMORY` entry
+from the list in `provider-patch.yaml` and upgrade. The provider writes the setting into the
+template each orb is created from, and a wake does not read the template again, so an orb keeps
+the kind of snapshot it was created with for life: switching affects only orbs created afterwards.
+
+On the [Performance](#performance) machine, `tiny` orbs woken one at a time, in seconds from the
+thread being unarchived to the agent's first command in the orb (median of 3 wakes from the
+node's copy and 2 from the NAS), and the size of each snapshot in the store:
+
+| Orb | Memory: node's copy / NAS | File-only: node's copy / NAS | Store, memory / file-only |
+| --- | --- | --- | --- |
+| A repository after `npm ci`, with a running server | 12.6 / 14.8 s | 33.4 / 38.5 s | 169 / 116 MB |
+| 768 MiB of random data in memory and 200 MB of random files | 14.9 / 30.8 s | 34.2 / 35.8 s | 1271 / 285 MB |
+
+A memory wake restored the processes, so the server answered and the agent's connection carried on.
+A file-only wake booted the orb again with only its files, and Amp then set up its connection anew,
+which took about 20 s more before the agent could run a command. File-only pauses took about 1.3 s
+instead of 2 to 4.5 s, and their uploads 6 to 12 s instead of 9 to 59 s.
 
 Things to know:
 
@@ -372,6 +391,8 @@ Things to know:
   gVisor worker, Substrate's code restores the orb's files without its memory, but an orb whose
   snapshot is still on its node first tries to move to a matching node. This has not been tested
   here: after such an upgrade, resume a test orb before relying on it.
+- **Leftover cgroups:** each file-only pause leaves a few empty cgroups for the orb on its
+  worker's node. They hold no processes and are removed slowly.
 
 ## Troubleshoot
 
