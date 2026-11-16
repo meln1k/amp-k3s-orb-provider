@@ -1,0 +1,53 @@
+# Traefik, the single entry point for every app. Its Service is a Tailscale LoadBalancer, so the
+# operator gives it one tailnet device, and nothing listens on the LAN. K3s's helm-controller
+# installs it at the version pinned here; keep K3s's own Traefik disabled (`--disable traefik`),
+# so K3s upgrades do not change or replace it.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: traefik
+---
+apiVersion: helm.cattle.io/v1
+kind: HelmChart
+metadata:
+  name: apps-traefik # not "traefik": K3s owns that name for its bundled Traefik
+  namespace: kube-system
+spec:
+  repo: https://traefik.github.io/charts
+  chart: traefik
+  version: 42.4.0
+  targetNamespace: traefik
+  valuesContent: |-
+    fullnameOverride: traefik
+    global:
+      checkNewVersion: false
+    deployment:
+      replicas: 1
+    resources:
+      requests: {cpu: 50m, memory: 64Mi}
+      limits: {memory: 256Mi}
+    ingressClass:
+      enabled: true
+      isDefaultClass: true
+      name: traefik
+    ports:
+      web:
+        http:
+          redirections:
+            entryPoint: {to: websecure, scheme: https, permanent: true}
+    service:
+      annotations:
+        # The device's name in the tailnet: k3s-apps.<tailnet>.ts.net.
+        tailscale.com/hostname: k3s-apps
+      spec:
+        type: LoadBalancer
+        loadBalancerClass: tailscale
+        # A LoadBalancer Service also opens a NodePort on every node's LAN address by default;
+        # without one, Traefik is reachable only through the Tailscale proxy (and in-cluster).
+        allocateLoadBalancerNodePorts: false
+    # Every app is served with the wildcard certificate (certs/letsencrypt.yaml), so an Ingress
+    # needs no tls section and no Secret of its own.
+    tlsStore:
+      default:
+        defaultCertificate:
+          secretName: wildcard-tls

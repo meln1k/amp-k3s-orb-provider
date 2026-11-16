@@ -1,0 +1,31 @@
+# The Tailscale Kubernetes operator. It runs one proxy per exposed Service, and only Traefik is
+# exposed (traefik.yaml), so the cluster is one tailnet device however many apps it hosts. Create
+# the `operator-oauth` Secret before applying (README, Apps platform).
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: tailscale
+---
+apiVersion: helm.cattle.io/v1
+kind: HelmChart
+metadata:
+  name: apps-tailscale-operator
+  namespace: kube-system
+spec:
+  repo: https://pkgs.tailscale.com/helmcharts
+  chart: tailscale-operator
+  version: 1.104.7
+  targetNamespace: tailscale
+  valuesContent: |-
+    operatorConfig:
+      hostname: k3s-operator
+      resources:
+        requests: {cpu: 10m, memory: 64Mi}
+        limits: {memory: 256Mi}
+    # No per-app Tailscale Ingresses: apps go through Traefik.
+    ingressClass:
+      enabled: false
+    # "true" runs kubectl over the tailnet as your Tailscale identity (README, kubectl over
+    # Tailscale). It needs a grant in the tailnet policy; without one it lets nobody in.
+    apiServerProxyConfig:
+      mode: "false"

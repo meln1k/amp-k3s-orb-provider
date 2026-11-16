@@ -1,0 +1,27 @@
+# Not a cluster resource: the K3s server's API authentication config (README, Agent access).
+# Copy it to /etc/rancher/k3s/amp-auth.yaml on the server and add to /etc/rancher/k3s/config.yaml
+#   kube-apiserver-arg:
+#     - authentication-config=/etc/rancher/k3s/amp-auth.yaml
+# then `systemctl restart k3s`. The API then also accepts the ID tokens orbs mint with
+# `amp orb id-token --audience k3s-apps`, as the user amp:<Amp user ID> of the thread's creator.
+# What that user may do in the apps namespace is up to its RoleBinding (README, Apps platform);
+# without one, a valid token gets only what every signed-in user gets, such as API discovery.
+apiVersion: apiserver.config.k8s.io/v1
+kind: AuthenticationConfiguration
+# K3s turns anonymous requests off with a flag it drops when this file is given; without this
+# line the API would answer anonymous requests again.
+anonymous:
+  enabled: false
+jwt:
+- issuer:
+    url: https://ampcode.com/api/workload-identity
+    # A token an orb mints for another service is refused. Any orb can mint one for this audience,
+    # so only orbs that reach the API (those on this cluster) and have a RoleBinding get in.
+    audiences: [k3s-apps]
+  claimValidationRules:
+  # Tokens from `amp orb id-token`, not Amp's other tokens from the same issuer.
+  - expression: claims.token_use == "exchanged"
+    message: not a token minted with amp orb id-token
+  claimMappings:
+    username:
+      expression: '"amp:" + claims.user_id'

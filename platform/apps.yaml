@@ -1,0 +1,171 @@
+# The namespace for long-running apps, and the Role agents deploy them with. Amp users' orbs get
+# it through a RoleBinding per user (README, Apps platform). It gives nothing outside this
+# namespace: no access to amp-orbs, ate-system or the nodes. No ServiceAccount here has any
+# rights, so a user cannot mint a lasting credential that outlives their RoleBinding.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: apps
+  labels:
+    # Non-root, no privilege escalation, no added capabilities, no host namespaces or paths.
+    pod-security.kubernetes.io/enforce: restricted
+---
+# Containers that set nothing get a memory limit equal to their request. Orb workers' memory is
+# reserved the same way, so under memory pressure the kubelet evicts pods over their request
+# first, and neither side can push the other out.
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: defaults
+  namespace: apps
+spec:
+  limits:
+  - type: Container
+    defaultRequest: {cpu: 50m, memory: 128Mi}
+    default: {memory: 128Mi}
+    max: {memory: 4Gi}
+---
+# What all apps together may reserve; size it to what you give apps next to orbs. No
+# LoadBalancer or NodePort Services: apps are reached through Traefik only.
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: apps
+  namespace: apps
+spec:
+  hard:
+    requests.cpu: "3"
+    requests.memory: 6Gi
+    limits.memory: 8Gi
+    requests.storage: 50Gi
+    persistentvolumeclaims: "10"
+    pods: "40"
+    services.loadbalancers: "0"
+    services.nodeports: "0"
+---
+# Apps accept connections from each other and from Traefik only. Orbs' traffic leaves through
+# the egress gateway in ate-system, so it reaches apps through Traefik like yours.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: from-traefik-and-apps
+  namespace: apps
+spec:
+  podSelector: {}
+  policyTypes: [Ingress]
+  ingress:
+  - from:
+    - podSelector: {}
+    - namespaceSelector:
+        matchLabels: {kubernetes.io/metadata.name: traefik}
+---
+# Apps reach each other, Traefik (so other apps by their public names), the cluster's DNS and the
+# internet, but not the LAN, the NAS, the nodes, the tailnet or anything else in the cluster.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: to-apps-dns-and-internet
+  namespace: apps
+spec:
+  podSelector: {}
+  policyTypes: [Egress]
+  egress:
+  - to:
+    - podSelector: {}
+    - namespaceSelector:
+        matchLabels: {kubernetes.io/metadata.name: traefik}
+  - to:
+    - namespaceSelector:
+        matchLabels: {kubernetes.io/metadata.name: kube-system}
+      podSelector:
+        matchLabels: {k8s-app: kube-dns}
+    ports:
+    - {port: 53, protocol: UDP}
+    - {port: 53, protocol: TCP}
+  - to:
+    - ipBlock:
+        cidr: 0.0.0.0/0
+        except: [10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10, 169.254.0.0/16]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: agent
+  namespace: apps
+rules:
+- apiGroups: [""]
+  resources: [pods, services, configmaps, secrets, persistentvolumeclaims]
+  verbs: [get, list, watch, create, update, patch, delete, deletecollection]
+- apiGroups: [""]
+  resources: [pods/log, events, endpoints, resourcequotas, limitranges]
+  verbs: [get, list, watch]
+- apiGroups: [""]
+  resources: [pods/exec, pods/attach, pods/portforward]
+  verbs: [get, create]
+- apiGroups: [apps]
+  resources: [deployments, deployments/scale, statefulsets, statefulsets/scale]
+  verbs: [get, list, watch, create, update, patch, delete]
+- apiGroups: [apps]
+  resources: [replicasets, controllerrevisions]
+  verbs: [get, list, watch]
+- apiGroups: [batch]
+  resources: [jobs, cronjobs]
+  verbs: [get, list, watch, create, update, patch, delete, deletecollection]
+- apiGroups: [networking.k8s.io]
+  resources: [ingresses]
+  verbs: [get, list, watch, create, update, patch, delete]
+- apiGroups: [networking.k8s.io]
+  resources: [networkpolicies]
+  verbs: [get, list, watch]
+- apiGroups: [discovery.k8s.io]
+  resources: [endpointslices]
+  verbs: [get, list, watch]
+- apiGroups: [metrics.k8s.io]
+  resources: [pods]
+  verbs: [get, list]
+---
+# Keeps every app behind Traefik:
+# - the Tailscale operator would give a Service annotated tailscale.com/expose, or an Ingress of
+#   class tailscale, a tailnet device of its own;
+# - kube-proxy sends traffic for a Service's externalIPs, from any pod or node, to that Service,
+#   so one could take over any address, such as the NAS (CVE-2020-8554).
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: apps-behind-traefik
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+    - apiGroups: [""]
+      apiVersions: [v1]
+      operations: [CREATE, UPDATE]
+      resources: [services]
+    - apiGroups: [networking.k8s.io]
+      apiVersions: [v1]
+      operations: [CREATE, UPDATE]
+      resources: [ingresses]
+  validations:
+  - expression: >-
+      !has(object.metadata.annotations) ||
+      !object.metadata.annotations.exists(k, k.startsWith('tailscale.com/'))
+    message: Apps are exposed through Traefik; tailscale.com annotations are not allowed here.
+  - expression: >-
+      request.resource.resource != 'ingresses' ||
+      !has(object.spec.ingressClassName) || object.spec.ingressClassName != 'tailscale'
+    message: Apps are exposed through Traefik; the tailscale IngressClass is not allowed here.
+  - expression: >-
+      request.resource.resource != 'services' ||
+      !has(object.spec.externalIPs) || size(object.spec.externalIPs) == 0
+    message: Services with externalIPs are not allowed here.
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: apps-behind-traefik
+spec:
+  policyName: apps-behind-traefik
+  validationActions: [Deny]
+  matchResources:
+    namespaceSelector:
+      matchLabels: {kubernetes.io/metadata.name: apps}

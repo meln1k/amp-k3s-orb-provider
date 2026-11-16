@@ -91,6 +91,9 @@ curl -sfL https://get.k3s.io | sh -s - server --disable traefik --disable servic
 curl -sfL https://get.k3s.io | K3S_URL=https://<server>:6443 K3S_TOKEN=<token> sh -
 ```
 
+The server runs without K3s's Traefik and ServiceLB, because orbs need no inbound ports. To host
+apps as well, the optional [apps platform](#apps-platform) installs a Traefik of its own.
+
 Label every machine that should run orbs. Don't taint them: atelet only needs the label, and
 leaving the taint off lets the small control plane share the same machines.
 
@@ -393,6 +396,218 @@ Things to know:
   here: after such an upgrade, resume a test orb before relying on it.
 - **Leftover cgroups:** each file-only pause leaves a few empty cgroups for the orb on its
   worker's node. They hold no processes and are removed slowly.
+
+## Apps platform
+
+Optional: the same cluster can host long-running apps next to the orbs, like self-hosted Amp
+Boxes. An agent builds an app's image in the cluster, deploys it, and you open it at
+`https://<app>.apps.example.com` from any device on your tailnet. It lives in
+[`platform/`](platform), and the orbs install neither uses nor needs it.
+
+- **Traefik** ([`traefik.yaml`](platform/traefik.yaml)) is the single entry point. Each app is a
+  Deployment, a Service and an Ingress with its own hostname, served with one wildcard
+  certificate; HTTP redirects to HTTPS.
+- **Tailscale** ([`tailscale.yaml`](platform/tailscale.yaml)): the
+  [Kubernetes operator](https://tailscale.com/kb/1236/kubernetes-operator) exposes only Traefik's
+  Service, so the cluster is one tailnet device, `k3s-apps`, however many apps it hosts. Traefik
+  gets no node ports, so nothing listens on your LAN.
+- **TLS** ([`cert-manager.yaml`](platform/cert-manager.yaml), [`certs/`](platform/certs)): a
+  Let's Encrypt wildcard certificate over DNS-01, so nothing has to be reachable from the
+  internet.
+- **DNS** ([`coredns-custom.yaml`](platform/coredns-custom.yaml)): inside the cluster, the apps'
+  names resolve to Traefik's ClusterIP, so orbs and apps reach `https://crm.apps.example.com` too.
+- **Isolation** ([`apps.yaml`](platform/apps.yaml)): apps run in the namespace `apps`, with a
+  quota, default container sizes and Pod Security `restricted` (non-root, no added capabilities,
+  no host access). They accept connections only from Traefik and each other, and reach only each
+  other, the cluster's DNS and the internet: not the LAN, the NAS, the nodes or other namespaces.
+  Admission refuses LoadBalancer and NodePort Services, `externalIPs` and Tailscale annotations
+  there, so every app goes through Traefik.
+- **Agent access** ([`amp-auth.yaml`](platform/amp-auth.yaml)): orbs sign in to the K3s API with
+  Amp's workload identity, a 10-minute token `amp orb id-token` mints for each command, so no
+  credential is stored anywhere. The API sees the thread's creator as `amp:<Amp user ID>`, and a
+  RoleBinding per user gives the Role `agent` in `apps` only: nothing in `amp-orbs`, `ate-system`
+  or the nodes.
+- **Images** ([`registry.yaml`](platform/registry.yaml), [`buildkit.yaml`](platform/buildkit.yaml)):
+  an in-cluster registry, and rootless BuildKit, which agents drive with `buildctl` over mutual
+  TLS, since Docker inside a gVisor orb cannot build. Build steps reach the internet but not the
+  LAN or the rest of the cluster.
+- **Agents' instructions**: the skill
+  [`deploying-k3s-apps`](skills/deploying-k3s-apps/SKILL.md) covers setup in an orb, build, push,
+  deploy, roll back with `kubectl rollout undo`, and removal.
+- **Optional:** [GoKubeDownscaler](https://kube-downscaler.io) for run schedules
+  ([`downscaler.yaml`](platform/downscaler.yaml)).
+
+Together the platform requests about 0.2 CPU and 600 MiB, plus the Tailscale proxy. Charts are
+pinned (Traefik 42.4.0, cert-manager v1.21.3, Tailscale operator 1.104.7, GoKubeDownscaler 1.4.3)
+and installed by K3s's own Helm controller, so no Helm is needed for them.
+
+### What orbs can reach
+
+Checked from an orb on the [Performance](#performance) machine. An orb's connections leave
+through the egress gateway, which resolves names with the cluster's DNS:
+
+- **The K3s API** at `https://kubernetes.default.svc.cluster.local`: reachable, with K3s's own
+  certificate. Orbs get no ServiceAccount token, and an anonymous request gets 401, so only a
+  token the API accepts gets in.
+- **Services**: TLS to any port by hostname (`metrics-server.kube-system.svc` answered 403), and
+  cleartext HTTP on ports 80, 8080, 8000 and 3000 only. So `buildctl` over TLS works, and the
+  registry (plain HTTP on 5000) is out of reach, which is fine: BuildKit pushes, and nodes pull.
+- **Apps**: through Traefik only. NetworkPolicies see the egress gateway's pod in `ate-system` as
+  the source, not the orb, and the policy in `apps` admits only Traefik and other apps.
+- The chart's `ate-system-observability` policy admits every pod to metrics ports, so orbs can
+  read `ate-system` metrics over HTTP on 8080 (`ate-controller` answered). This overlay does not
+  change that.
+
+### Set up
+
+1. **Domain.** Pick a subdomain for the apps, such as `apps.example.com`, in a zone at a DNS
+   provider with an API. Replace `apps.example.com` with it in
+   [`certs/letsencrypt.yaml`](platform/certs/letsencrypt.yaml) and
+   [`coredns-custom.yaml`](platform/coredns-custom.yaml), and keep those two edits in your clone,
+   as with `nas-patch.yaml`. Tailscale names (`*.ts.net`) can't have subdomains, so a wildcard
+   needs your own domain.
+2. **Tailscale.** In the [tailnet policy](https://login.tailscale.com/admin/acls), add
+   `"tag:k8s-operator": []` and `"tag:k8s": ["tag:k8s-operator"]` to `tagOwners`. Create an
+   [OAuth client](https://login.tailscale.com/admin/settings/oauth) with the Devices Core and Auth
+   Keys write scopes and the tag `tag:k8s-operator`, then:
+
+   ```sh
+   kubectl create namespace tailscale
+   read -rp 'Client ID: ' I; read -rsp 'Client secret: ' S; printf '\n'
+   kubectl -n tailscale create secret generic operator-oauth \
+     --from-literal=client_id="$I" --from-literal=client_secret="$S"; unset I S
+   ```
+
+   The proxy joins the tailnet as `tag:k8s`. Unless your policy still allows everything, grant
+   access to the apps, for example to every member:
+
+   ```json
+   "grants": [{"src": ["autogroup:member"], "dst": ["tag:k8s"], "ip": ["tcp:80", "tcp:443"]}]
+   ```
+
+3. **DNS-01.** For Cloudflare, create an API token with Zone → DNS → Edit and Zone → Zone → Read
+   on the zone; for another provider, change the solver in `certs/letsencrypt.yaml`.
+
+   ```sh
+   kubectl create namespace cert-manager
+   read -rsp 'Cloudflare token: ' T; printf '\n'
+   kubectl -n cert-manager create secret generic cloudflare-api-token --from-literal=api-token="$T"; unset T
+   ```
+
+4. **Nodes.** Running pods and orbs keep running through the K3s restarts below.
+   - **Every node** pulls app images from the registry's fixed ClusterIP. Write
+     `/etc/rancher/k3s/registries.yaml`, then `systemctl restart k3s` (`k3s-agent` on agents):
+
+     ```yaml
+     mirrors:
+       "registry.registry.svc:5000":
+         endpoint: ["http://10.43.0.50:5000"]
+     ```
+
+   - **The server** accepts orbs' Amp tokens. Copy [`platform/amp-auth.yaml`](platform/amp-auth.yaml)
+     to `/etc/rancher/k3s/amp-auth.yaml`, add this to `/etc/rancher/k3s/config.yaml`, and restart
+     K3s (with the registry change, one restart does both):
+
+     ```yaml
+     kube-apiserver-arg:
+       - authentication-config=/etc/rancher/k3s/amp-auth.yaml
+     ```
+
+     The API fetches Amp's signing keys from `https://ampcode.com/api/workload-identity`. The file
+     also keeps anonymous requests refused: K3s drops its own flag for that once the file is set.
+
+5. **Install.** `kubectl apply -k platform`. When `kubectl -n cert-manager get deploy` shows all
+   three ready, `kubectl apply -k platform/certs` and `kubectl -n kube-system rollout restart
+   deploy/coredns`. Within a few minutes, `kubectl -n traefik get certificate wildcard` is Ready
+   and `kubectl -n traefik get svc traefik` shows the tailnet address. BuildKit starts once its
+   certificate exists.
+6. **DNS record.** Point `*.apps.example.com` at Traefik's tailnet IPv4 address,
+   `kubectl -n traefik get svc traefik -o jsonpath='{.status.loadBalancer.ingress[*].ip}'`. It
+   keeps that address when its pod moves. A public record is fine: it only reveals a 100.x address
+   that works from your tailnet; on Cloudflare, leave it DNS only, not proxied. To keep the names
+   private, serve the zone with Tailscale [split DNS](https://tailscale.com/kb/1054/dns) instead.
+7. **Agents.** Give each Amp user whose orbs may deploy a RoleBinding of their own. The user ID is
+   the `user_id` claim of a token their orb mints, such as
+   `amp orb id-token --audience x | cut -d. -f2 | base64 -d`:
+
+   ```sh
+   kubectl -n apps create rolebinding amp-<name> --role=agent --user=amp:<user ID>
+   kubectl -n apps get rolebindings -o wide   # who has access
+   kubectl -n apps delete rolebinding amp-<name>   # revoke, from the next command on
+   ```
+
+   Then store the kubeconfig and the apps' domain as Amp environment variables, not secrets,
+   because neither holds a credential: for every command, kubectl runs `amp orb id-token
+   --audience k3s-apps` in the orb.
+
+   ```sh
+   ./platform/agent-kubeconfig.sh | amp secrets set APPS_KUBECONFIG --workspace --env --data-file -
+   printf apps.example.com | amp secrets set APPS_DOMAIN --workspace --env --data-file -
+   ```
+
+   Its server is the API's in-cluster name, so it works from orbs on this cluster and nowhere
+   else. Then add the skill where your orbs load it: your user skills repository
+   (`amp skills repositories` lists it), or `.agents/skills/` in each app's repository.
+
+### Apps next to orbs
+
+Apps and orbs share the nodes, and the scheduler places both by their requests: an orb reserves
+its memory plus 128 MiB and 750m CPU, and an app container its own requests (50m and 128 MiB when
+it sets none, with a memory limit equal to that). Neither can be scheduled onto memory the other
+reserved, and when the CPU is busy each gets a share in proportion to its requests. The quota in
+`apps.yaml` caps all apps together at 3 CPU and 6 GiB of requests and 8 GiB of limits; size it to
+what you want to leave for orbs.
+
+For a hard split, give apps a machine of their own: leave it without the
+`ate.dev/sandboxClass=gvisor` label, so orbs never run there, and pin the `apps` namespace to it
+with Kubernetes' `PodNodeSelector` admission plugin (`kube-apiserver-arg:
+enable-admission-plugins=NodeRestriction,PodNodeSelector` in the server's config, and the
+namespace annotation `scheduler.alpha.kubernetes.io/node-selector`). This has not been tried here.
+
+The registry keeps every image pushed. To free its disk, delete old tags and run, while nobody
+pushes, `kubectl -n registry exec deploy/registry -- registry garbage-collect --delete-untagged
+/etc/distribution/config.yml`. BuildKit keeps at most 20 GB of build cache.
+
+### kubectl over Tailscale
+
+Set `apiServerProxyConfig.mode` to `"true"` in `platform/tailscale.yaml`, apply it, and grant
+yourself access in the tailnet policy. This maps tailnet admins to cluster admins:
+
+```json
+"grants": [{
+  "src": ["autogroup:admin"],
+  "dst": ["tag:k8s-operator"],
+  "ip": ["tcp:443"],
+  "app": {"tailscale.com/cap/kubernetes": [{"impersonate": {"groups": ["system:masters"]}}]}
+}]
+```
+
+Then `tailscale configure kubeconfig k3s-operator` on your machine. For narrower access,
+impersonate a group of your own and bind it with a RoleBinding, such as `edit` in `apps`. Not
+tested yet.
+
+### Schedules
+
+Uncomment `downscaler.yaml` in `platform/kustomization.yaml` and apply. It acts only on `apps`,
+on workloads annotated with a schedule, such as
+`kubectl -n apps annotate deploy/crm downscaler/uptime="Mon-Fri 08:00-20:00 Europe/Berlin"`.
+
+### Remove it
+
+Delete Traefik first, while the Tailscale operator still runs to remove its proxy:
+
+```sh
+kubectl delete -f platform/traefik.yaml
+kubectl delete -k platform/certs
+kubectl delete -k platform
+kubectl delete -f platform/downscaler.yaml --ignore-not-found
+```
+
+On the server, remove the `authentication-config` line from `/etc/rancher/k3s/config.yaml`, and on
+every node `/etc/rancher/k3s/registries.yaml`, then restart K3s. Remove the `k3s-apps` and
+`k3s-operator` devices from your tailnet. This deletes the apps, the registry and their volumes.
+cert-manager's CRDs stay; delete them with
+`kubectl delete crd -l app.kubernetes.io/instance=apps-cert-manager`.
 
 ## Troubleshoot
 

@@ -1,0 +1,59 @@
+# A private CA for BuildKit's mutual TLS: buildkitd accepts only clients with a certificate from
+# it. The client certificate is a Secret in the apps namespace, so whoever holds the agent's
+# kubeconfig can build, and nobody else.
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: selfsigned
+spec:
+  selfSigned: {}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: buildkit-ca
+  namespace: cert-manager
+spec:
+  isCA: true
+  commonName: buildkit-ca
+  secretName: buildkit-ca
+  duration: 87600h
+  privateKey: {algorithm: ECDSA, size: 256}
+  issuerRef: {kind: ClusterIssuer, name: selfsigned}
+---
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: buildkit-ca
+spec:
+  ca: {secretName: buildkit-ca}
+---
+# Ten years, like the CA: buildkitd reads its certificate only when it starts, so a short one
+# would expire under a running pod. Any restart after cert-manager renews it picks up the new one.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: buildkitd
+  namespace: buildkit
+spec:
+  secretName: buildkitd-tls
+  dnsNames: [buildkitd.buildkit.svc.cluster.local, buildkitd.buildkit.svc]
+  usages: [server auth]
+  duration: 87600h
+  privateKey: {algorithm: ECDSA, size: 256}
+  issuerRef: {kind: ClusterIssuer, name: buildkit-ca}
+---
+# Agents read it from the apps namespace when their orb sets up, so renewals reach them.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: buildkit-client
+  namespace: apps
+spec:
+  secretName: buildkit-client
+  commonName: agent
+  usages: [client auth]
+  duration: 8760h
+  renewBefore: 720h
+  privateKey: {algorithm: ECDSA, size: 256}
+  issuerRef: {kind: ClusterIssuer, name: buildkit-ca}

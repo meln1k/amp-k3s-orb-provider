@@ -1,0 +1,121 @@
+# BuildKit builds the apps' images, because Docker inside a gVisor orb cannot. Agents send it the
+# build context from their orb with `buildctl` over mutual TLS (certs/buildkit.yaml), and it
+# pushes the image to the registry (registry.yaml). It runs rootless, as uid 1000 in a user
+# namespace of its own, in a namespace where agents cannot create pods.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: buildkit
+  labels:
+    # Rootless BuildKit is not privileged, but it needs seccomp and AppArmor unconfined to create
+    # its user namespace, which even the baseline level refuses.
+    pod-security.kubernetes.io/enforce: privileged
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: buildkitd
+  namespace: buildkit
+data:
+  buildkitd.toml: |
+    [worker.oci]
+      gc = true
+      # The build cache's share of the volume below.
+      maxUsedSpace = "20GB"
+    [worker.containerd]
+      enabled = false
+    [registry."registry.registry.svc:5000"]
+      http = true
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: buildkitd
+  namespace: buildkit
+spec:
+  accessModes: [ReadWriteOnce]
+  resources: {requests: {storage: 25Gi}}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: buildkitd
+  namespace: buildkit
+spec:
+  replicas: 1
+  strategy: {type: Recreate}
+  selector: {matchLabels: {app: buildkitd}}
+  template:
+    metadata: {labels: {app: buildkitd}}
+    spec:
+      containers:
+      - name: buildkitd
+        image: moby/buildkit:v0.35.0-rootless
+        args:
+        - --addr=unix:///run/user/1000/buildkit/buildkitd.sock
+        - --addr=tcp://0.0.0.0:1234
+        - --tlscacert=/certs/ca.crt
+        - --tlscert=/certs/tls.crt
+        - --tlskey=/certs/tls.key
+        - --config=/etc/buildkit/buildkitd.toml
+        # Build steps share BuildKit's PID namespace: a pod cannot mount a new /proc.
+        - --oci-worker-no-process-sandbox
+        ports: [{name: grpc, containerPort: 1234}]
+        securityContext:
+          runAsUser: 1000
+          runAsGroup: 1000
+          seccompProfile: {type: Unconfined}
+          appArmorProfile: {type: Unconfined}
+        # A build gets the CPU orbs and apps leave over, and at most 3 GiB of memory.
+        resources:
+          requests: {cpu: 100m, memory: 256Mi}
+          limits: {cpu: "2", memory: 3Gi}
+        readinessProbe:
+          exec:
+            command: [buildctl, --addr=unix:///run/user/1000/buildkit/buildkitd.sock, debug, workers]
+          periodSeconds: 30
+          timeoutSeconds: 10
+        volumeMounts:
+        - {name: certs, mountPath: /certs, readOnly: true}
+        - {name: config, mountPath: /etc/buildkit}
+        - {name: cache, mountPath: /home/user/.local/share/buildkit}
+      volumes:
+      - {name: certs, secret: {secretName: buildkitd-tls}}
+      - {name: config, configMap: {name: buildkitd}}
+      - {name: cache, persistentVolumeClaim: {claimName: buildkitd}}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: buildkitd
+  namespace: buildkit
+spec:
+  selector: {app: buildkitd}
+  ports: [{name: grpc, port: 1234, targetPort: grpc}]
+---
+# Build steps run in BuildKit's pod, so they get its network: the registry, the cluster's DNS and
+# the internet, but not the LAN, the NAS, the nodes or the rest of the cluster.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: buildkitd-egress
+  namespace: buildkit
+spec:
+  podSelector: {}
+  policyTypes: [Egress]
+  egress:
+  - to:
+    - namespaceSelector:
+        matchLabels: {kubernetes.io/metadata.name: registry}
+  - to:
+    - namespaceSelector:
+        matchLabels: {kubernetes.io/metadata.name: kube-system}
+      podSelector:
+        matchLabels: {k8s-app: kube-dns}
+    ports:
+    - {port: 53, protocol: UDP}
+    - {port: 53, protocol: TCP}
+  - to:
+    - ipBlock:
+        cidr: 0.0.0.0/0
+        except: [10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10, 169.254.0.0/16]

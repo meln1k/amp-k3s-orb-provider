@@ -1,0 +1,38 @@
+# cert-manager issues the apps' wildcard certificate over DNS-01, so nothing in the cluster has to
+# be reachable from the internet, and the certificates for BuildKit's mutual TLS (certs/).
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: cert-manager
+---
+apiVersion: helm.cattle.io/v1
+kind: HelmChart
+metadata:
+  name: apps-cert-manager
+  namespace: kube-system
+spec:
+  repo: https://charts.jetstack.io
+  chart: cert-manager
+  version: v1.21.3
+  targetNamespace: cert-manager
+  valuesContent: |-
+    fullnameOverride: cert-manager
+    # Without ingress-shim, an annotation on an Ingress cannot have cert-manager issue a
+    # certificate; agents can create Ingresses, and nothing here uses it.
+    extraArgs: ["--controllers=*,-ingress-shim"]
+    crds:
+      enabled: true
+      keep: true
+    resources:
+      requests: {cpu: 10m, memory: 64Mi}
+      limits: {memory: 256Mi}
+    webhook:
+      resources:
+        requests: {cpu: 10m, memory: 32Mi}
+        limits: {memory: 128Mi}
+    cainjector:
+      resources:
+        requests: {cpu: 10m, memory: 64Mi}
+        limits: {memory: 256Mi}
+    startupapicheck:
+      enabled: false
