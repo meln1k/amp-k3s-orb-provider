@@ -12,6 +12,9 @@ nodes or other namespaces, and the cluster refuses root containers, LoadBalancer
 Services, `externalIPs` and Tailscale annotations. Docker inside the orb cannot build or push
 these images.
 
+Pushing code does not deploy it. Build and deploy only when the user asks for a deploy; a request
+to commit, push or prepare a change is not one.
+
 ## Setup, once per orb
 
 ```sh
@@ -106,7 +109,7 @@ spec:
   limit is refused. Apps share a quota (`kubectl describe quota apps`); a pod over it is refused.
 - State that must survive a restart goes in a PersistentVolumeClaim, with `strategy: {type:
   Recreate}` on the Deployment.
-- Credentials go in a Secret created with `kubectl create secret generic`, never in the repo.
+- Credentials go in a Secret, never in the repo or the manifest (see [Secrets](#secrets)).
 - Apps reach each other by Service name and the internet, but not the LAN or the rest of the
   cluster.
 
@@ -119,8 +122,38 @@ kubectl rollout status deploy/$APP --timeout=3m
 curl -fsS "https://$APP.$APPS_DOMAIN/healthz"
 ```
 
+A finished rollout and a healthy `/healthz` do not prove the change works: also open the page or
+call the endpoint the change affects. On a redeploy of an app with a PersistentVolumeClaim, check
+that its existing data is still there. Then tell the user the app's URL, the deployed image and
+its commit, and what you checked.
+
 If the rollout does not finish, read `kubectl describe pod -l app=$APP`, `kubectl logs
 deploy/$APP` and `kubectl get events --sort-by=.lastTimestamp`, then roll back.
+
+## Secrets
+
+Keep credentials in Secrets, and pass them to the app with `envFrom: [{secretRef: {name: crm}}]`
+or `valueFrom.secretKeyRef` in the Deployment. Never print a value: `kubectl describe secret`
+shows only the keys and sizes, while `kubectl get secret -o yaml` shows the values.
+
+- **A value you generate**, such as a session key, goes from the generator straight into the
+  Secret:
+
+  ```sh
+  kubectl create secret generic $APP-session --from-literal=SESSION_SECRET="$(openssl rand -hex 32)"
+  ```
+
+- **A value the user or a third party provides**, such as an API key, must not pass through the
+  thread. Do not ask for it in chat. Give the user this command to run in the orb's Terminal
+  tab, where they type the value at a hidden prompt:
+
+  ```sh
+  read -rsp 'Value: ' V; printf '\n'; kubectl -n apps create secret generic crm-stripe --from-literal=STRIPE_KEY="$V"; unset V
+  ```
+
+Give each provided value its own Secret, so replacing it means deleting and creating only that
+one. An app reads its Secrets when its pods start, so after a change run `kubectl rollout restart
+deploy/$APP`.
 
 ## Roll back
 
@@ -133,6 +166,19 @@ kubectl rollout status deploy/$APP --timeout=3m
 
 `rollout undo` changes only the pod template. The next deploy applies the manifest again, so fix
 forward from the code and deploy as above.
+
+## Run on a schedule
+
+Only when the user asks. If the cluster runs the optional downscaler (ask the user; you cannot see
+its namespace), it scales an app to zero outside a time window and back up inside it:
+
+```sh
+kubectl annotate deploy/$APP downscaler/uptime="Mon-Fri 08:00-20:00 Europe/Berlin" --overwrite
+kubectl annotate deploy/$APP downscaler/uptime-   # run all the time again
+```
+
+Use the user's time zone, and ask when you do not know it: the orb's clock is UTC. Outside the
+window the app has no pods and its URL does not answer, so deploy and check it inside the window.
 
 ## Remove
 

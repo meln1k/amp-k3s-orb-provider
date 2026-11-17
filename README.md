@@ -434,7 +434,8 @@ Boxes. An agent builds an app's image in the cluster, deploys it, and you open i
   LAN or the rest of the cluster.
 - **Agents' instructions**: the skill
   [`deploying-k3s-apps`](skills/deploying-k3s-apps/SKILL.md) covers setup in an orb, build, push,
-  deploy, roll back with `kubectl rollout undo`, and removal.
+  deploy and its checks, Secrets the user types in themselves, roll back with `kubectl rollout
+  undo`, run schedules, and removal. It deploys only when the user asks.
 - **Optional:** [GoKubeDownscaler](https://kube-downscaler.io) for run schedules
   ([`downscaler.yaml`](platform/downscaler.yaml)).
 
