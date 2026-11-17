@@ -33,8 +33,8 @@ What the overlay changes in the chart:
   the snapshot gateway requests 250m and atelet's objectstore plugin 100m, and the provider's
   probes get 10 s instead of 1 s, so busy orbs do not starve the control plane, stall snapshot
   uploads or get the provider restarted.
-- Warm workers: one idle `tiny` worker instead of one `small`, and no extra workers to fill a
-  node's free room.
+- Warm workers: one idle `small` worker, the default type, instead of one 16-CPU, 32 GiB
+  worker, and no extra workers to fill a node's free room.
 - earlyoom: the same patch starts earlyoom in every orb, so a runaway process is stopped
   before the orb runs out of memory (see [Running out of memory](#running-out-of-memory)).
 
@@ -241,8 +241,9 @@ the node's IPv6 address, and when the router hands out a new IPv6 prefix, K3s ex
 start ("NodeIPs changed for the node") before systemd restarts it.
 
 On a server with 8 cores, 16 threads and 24 GB, memory runs out first: after the reservation and
-the control plane, about 4 `small` or 9 `tiny` orbs fit. Those orbs can use at most 8 or 9
-threads between them, so the shared services keep the rest even when every orb is busy.
+the control plane, about 4 `small` or 7 `tiny` orbs fit, because the idle warm `small` worker
+keeps its 4 GiB while only `tiny` orbs run. Those orbs can use at most 8 or 7 threads between
+them, so the shared services keep the rest even when every orb is busy.
 
 ### Running out of memory
 

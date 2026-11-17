@@ -13,8 +13,8 @@ workers:
   # (lowercase letters, digits and dashes). A worker reserves memoryGi + 128 MiB and 750m CPU.
   # A warm worker holds that even while idle, so keep one only on the type you start most.
   types:
-    - {name: tiny, cpu: 1, memoryGi: 2, min: 0, warm: 1}
-    - {name: small, cpu: 2, memoryGi: 4, min: 0, warm: 0}
+    - {name: tiny, cpu: 1, memoryGi: 2, min: 0, warm: 0}
+    - {name: small, cpu: 2, memoryGi: 4, min: 0, warm: 1}
     - {name: medium, cpu: 4, memoryGi: 8, min: 0, warm: 0}
     - {name: large, cpu: 8, memoryGi: 16, min: 0, warm: 0}
     - {name: xxlarge, cpu: 16, memoryGi: 32, min: 0, warm: 0}
