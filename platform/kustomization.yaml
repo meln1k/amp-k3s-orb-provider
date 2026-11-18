@@ -1,5 +1,5 @@
-# Optional apps platform next to the orbs (README, Apps platform): `kubectl apply -k platform`,
-# then `kubectl apply -k platform/certs` once cert-manager is running.
+# The apps platform next to the orbs (docs/reference.md, Apps platform). install.sh applies it with
+# apps.example.com replaced by APPS_DOMAIN, then certs/ once cert-manager is running.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 resources:

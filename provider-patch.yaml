@@ -1,4 +1,4 @@
-# Memory snapshots, worker size and CPU, and earlyoom (see README): the provider container patches five
+# Memory snapshots, worker size and CPU, and earlyoom (docs/reference.md): the provider container patches five
 # strings in its own bundle at start and refuses to start unless each is found exactly once. The
 # last three ops lengthen its probe timeouts.
 - {op: test, path: /spec/template/spec/initContainers/2/name, value: provider}

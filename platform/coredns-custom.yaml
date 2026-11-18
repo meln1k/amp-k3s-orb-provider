@@ -2,8 +2,8 @@
 # which pods cannot reach. That includes orbs: their DNS and their egress gateway both use
 # CoreDNS, so an agent reaches https://crm.apps.example.com through Traefik, with the same
 # certificate as you. K3s's CoreDNS imports the *.server keys of this ConfigMap as server blocks;
-# this one answers every name in the zone with the address of Traefik's Service. Replace
-# apps.example.com with your apps' domain (README, Apps platform).
+# this one answers every name in the zone with the address of Traefik's Service. install.sh
+# replaces apps.example.com with APPS_DOMAIN.
 apiVersion: v1
 kind: ConfigMap
 metadata:

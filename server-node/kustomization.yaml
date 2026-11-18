@@ -1,4 +1,4 @@
-# For a cluster with one server much bigger than its agents (see README, Sizing): put the shared
+# For a cluster with one server much bigger than its agents (see docs/reference.md, Sizing): put the shared
 # services on the K3s server, so the agents' CPU goes to orbs, and give the snapshot gateway the
 # CPU a busy server can spare. Enable it in ../kustomization.yaml under components.
 apiVersion: kustomize.config.k8s.io/v1alpha1

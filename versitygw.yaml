@@ -1,6 +1,6 @@
 # S3 for paused orbs: Versity S3 Gateway with its POSIX backend, which stores each object as a
 # file. It writes them through gocryptfs, so the volume, a local one or, with nas-patch.yaml, an
-# NFS export, only holds encrypted files and names (see README, Snapshot encryption).
+# NFS export, only holds encrypted files and names (see docs/reference.md, Snapshot encryption).
 # Lives in ate-system so the runtime reaches it.
 apiVersion: v1
 kind: PersistentVolumeClaim

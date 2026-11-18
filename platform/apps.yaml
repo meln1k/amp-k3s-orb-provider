@@ -1,5 +1,5 @@
 # The namespace for long-running apps, and the Role agents deploy them with. Amp users' orbs get
-# it through a RoleBinding per user (README, Apps platform). It gives nothing outside this
+# it through a RoleBinding per user (docs/reference.md, Apps platform). It gives nothing outside this
 # namespace: no access to amp-orbs, ate-system or the nodes. No ServiceAccount here has any
 # rights, so a user cannot mint a lasting credential that outlives their RoleBinding.
 apiVersion: v1

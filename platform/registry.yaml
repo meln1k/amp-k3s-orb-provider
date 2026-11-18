@@ -1,6 +1,6 @@
 # The apps' image registry, inside the cluster only. BuildKit pushes to it by its Service name,
 # and every node's containerd pulls from its fixed ClusterIP over plain HTTP, set in
-# /etc/rancher/k3s/registries.yaml (README, Apps platform). Orbs cannot reach it: their egress
+# /etc/rancher/k3s/registries.yaml, which node-prep.sh writes. Orbs cannot reach it: their egress
 # gateway allows cleartext HTTP on ports 80, 8080, 8000 and 3000 only.
 apiVersion: v1
 kind: Namespace
@@ -34,7 +34,7 @@ spec:
         ports: [{name: http, containerPort: 5000}]
         env:
         # Lets `regctl tag rm` and the like delete tags; disk is freed by the registry's
-        # garbage-collect command (README, Apps platform).
+        # garbage-collect command (docs/reference.md, Apps platform).
         - {name: REGISTRY_STORAGE_DELETE_ENABLED, value: "true"}
         resources:
           requests: {cpu: 10m, memory: 32Mi}

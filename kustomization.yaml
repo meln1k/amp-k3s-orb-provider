@@ -13,11 +13,11 @@ secretGenerator:
     namespace: ate-system
     envs: [s3.env]
     options: {disableNameSuffixHash: true}
-  - name: orb-snapshots-key # encrypts the snapshot store; see README, Snapshot encryption
+  - name: orb-snapshots-key # encrypts the snapshot store; see docs/reference.md, Snapshot encryption
     namespace: ate-system
     files: [snapshots.key]
     options: {disableNameSuffixHash: true}
-# A server much bigger than the agents: run the shared services on it (see README, Sizing).
+# A server much bigger than the agents: run the shared services on it (see docs/reference.md, Sizing).
 # components:
 #   - server-node
 replicas:
@@ -77,7 +77,7 @@ patches:
       spec: {template: {spec: {containers: [{name: ate-idp-server, resources: {requests: {cpu: 25m}}}]}}}
   # atelet: K3s nodes have no EKS image credential provider, so drop its args and host mounts (as
   # Substrate's kind overlay does) and pull the public images anonymously. Then the snapshot
-  # upload limit and the local copy's lifetime (see README, Snapshot timing). The objectstore
+  # upload limit and the local copy's lifetime (see docs/reference.md, Snapshot timing). The objectstore
   # plugin compresses uploads and decompresses downloads, so it gets a CPU share for busy nodes.
   - target: {kind: DaemonSet, name: atelet, namespace: ate-system}
     patch: |-
