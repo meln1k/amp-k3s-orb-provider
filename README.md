@@ -31,13 +31,15 @@ variable that already holds it, under any name. Never print a credential's value
 
 On an `amp --no-tui` runner, threads get these secrets only when the runner runs with
 `--amp-env` or the setting `"amp.runner.env.enabled": true`; it then passes every secret the user
-has to every thread it serves. If yours has neither, ask the user to enable it and restart the
+has to every thread it serves. It reads them when it starts, so a secret stored afterwards reaches
+threads only after the runner restarts: ask the user for every credential before that restart. If yours has neither, ask the user to enable it and restart the
 runner, or to run `install.sh` (step 4) on the server in a terminal and type each credential at
 its hidden prompt. In the second case, continue from step 5, reading the Cloudflare token from
 `kubectl -n cert-manager get secret cloudflare-api-token` without printing it.
 
-The commands below assume a root shell. With sudo instead, prefix them with `sudo`, and use
-`sudo k3s kubectl` for kubectl.
+The commands below assume a root shell. With sudo instead, prefix them with `sudo`, use
+`sudo k3s kubectl` for kubectl, and pass credentials to `install.sh` on standard input as over
+SSH (step 4), with `sudo bash -c` in place of `ssh`.
 
 ### Ask the user
 
@@ -124,6 +126,11 @@ provider, and add these orb types with `small` as the default; their names must 
 | `large` | 8 | 16 GiB |
 | `xxlarge` | 16 | 32 GiB |
 
+Then check with `manage_amp` (topic `orb_providers`, operation `list`) that the provider's types
+are exactly these five names, with `small` as the default, and ask the user to fix any that
+differ: an orb of a misspelled type never starts. Amp cannot rename a type, so a fix is adding the
+right one and removing the wrong one.
+
 ### 4. Install
 
 With a NAS, first check the export (mount it, create a file as root, unmount), then set its
@@ -154,11 +161,15 @@ It can run again; a second run is an upgrade. A first install takes 5 to 15 minu
 
 Skip this with `--orbs-only`.
 
-1. Create the record `install.sh` printed, `*.<domain>  A  <100.x address>`, with the
-   Cloudflare token (DNS only, not proxied).
+1. Create the record `install.sh` printed, `*.<domain>  A  <100.x address>`, DNS only (not
+   proxied), with the Cloudflare API: the zone's ID from `GET /zones?name=<zone>`, then
+   `POST /zones/<zone ID>/dns_records` with
+   `{"type": "A", "name": "*.<domain>", "content": "<100.x address>", "proxied": false}`. Send the
+   token as a header read from standard input (`curl -H @-`), not on the command line. Check with
+   `dig +short x.<domain>`.
 2. Give the user's orbs access to the `apps` namespace. Their Kubernetes user is
-   `amp:<Amp user ID>`; in the user's own orb that ID is `$AMP_USER_ID`, elsewhere use
-   `get_current_user_identity` from the `amp` tools.
+   `amp:<Amp user ID>`, a `user_…` ID. In the user's own orb it is `$AMP_USER_ID`; on a runner
+   or the user's machine, `.accounts[].userID` in `~/.local/share/amp/accounts.json`.
 
    ```sh
    kubectl -n apps create rolebinding amp-<name> --role=agent --user=amp:<Amp user ID>
@@ -175,13 +186,18 @@ Skip this with `--orbs-only`.
 
 On the server, every pod in `amp-orbs` and `ate-system` should be Running, and
 `kubectl -n amp-orbs logs deploy/amp-orb-provider -c spawner` should show `Orb provider started`.
-Tell the user:
+For the apps platform, also check that every pod in `cert-manager`, `tailscale`, `traefik`,
+`registry` and `buildkit` is Running, that `kubectl -n traefik get certificate wildcard` is Ready,
+that `x.<domain>` resolves to Traefik's 100.x address, and that `curl https://x.<domain>` (from a
+device on the tailnet) gets Traefik's 404 with a valid certificate. Tell the user:
 
 - The provider's name, and that they pick it under **Orb → Self-Hosted** in the thread composer,
   or make it the default under **Default Orb** in Settings → Orbs.
 - To test it: start a thread on it, run a background process, wait until the orb pauses, then
   send another message; the process is still running.
-- What was installed, where `snapshots.key` is, and for the apps platform the app URL pattern.
+- What was installed, where `snapshots.key` is, and for the apps platform the app URL pattern,
+  that the skill `skills/deploying-k3s-apps` goes in their skills, and that only threads on this
+  provider can deploy apps.
 
 If something fails, read [Troubleshoot](docs/reference.md#troubleshoot) and the section of
 [docs/reference.md](docs/reference.md) for the part that failed before changing anything.

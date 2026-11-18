@@ -1,7 +1,8 @@
 #!/bin/sh
 # Prints the kubeconfig orbs deploy apps with, on one line, for the Amp environment variable
 # APPS_KUBECONFIG:
-#   ./platform/agent-kubeconfig.sh | amp secrets set APPS_KUBECONFIG --workspace --env --data-file -
+# with manage_amp (topic environment_variables, scope personal), or on the user's machine:
+#   ./platform/agent-kubeconfig.sh | amp secrets set APPS_KUBECONFIG --user --env --data-file -
 # It holds no secret: for every command, kubectl asks `amp orb id-token` in the orb for a fresh
 # 10-minute token, which the API accepts as amp:<Amp user ID> (amp-auth.yaml).
 # Its server is the API's in-cluster name, which only orbs on this cluster reach.
