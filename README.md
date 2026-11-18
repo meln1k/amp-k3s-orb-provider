@@ -29,11 +29,12 @@ dialog. The value then reaches the user's orbs as an environment variable, after
 `amp orb restart-processes` in an orb that is already running. Before asking, check `env` for a
 variable that already holds it, under any name. Never print a credential's value.
 
-Personal secrets reach only orbs. When this thread runs on a runner or the user's own machine,
-its environment has none of them. Then have the user run `install.sh` (step 4) on the server in a
-terminal and type each credential at its hidden prompt; continue from step 5, reading the
-Cloudflare token from `kubectl -n cert-manager get secret cloudflare-api-token` without printing
-it.
+On an `amp --no-tui` runner, threads get these secrets only when the runner runs with
+`--amp-env` or the setting `"amp.runner.env.enabled": true`; it then passes every secret the user
+has to every thread it serves. If yours has neither, ask the user to enable it and restart the
+runner, or to run `install.sh` (step 4) on the server in a terminal and type each credential at
+its hidden prompt. In the second case, continue from step 5, reading the Cloudflare token from
+`kubectl -n cert-manager get secret cloudflare-api-token` without printing it.
 
 The commands below assume a root shell. With sudo instead, prefix them with `sudo`, and use
 `sudo k3s kubectl` for kubectl.
