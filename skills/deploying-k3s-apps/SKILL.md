@@ -24,6 +24,7 @@ mkdir -p ~/.kube ~/.buildkit
 # No credential in it: kubectl mints a fresh Amp ID token with `amp orb id-token` per command.
 (umask 077; printf '%s' "$APPS_KUBECONFIG" > ~/.kube/config)
 command -v kubectl >/dev/null || {
+  # within one minor version of the server: `kubectl version` shows both once it is installed
   curl -fsSLo /tmp/kubectl "https://dl.k8s.io/release/$(curl -fsSL https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
   sudo install /tmp/kubectl /usr/local/bin/kubectl; }
 command -v buildctl >/dev/null ||
@@ -37,12 +38,15 @@ kubectl auth whoami                   # amp:<your Amp user ID>
 kubectl auth can-i create deployments # yes; "no" means the user has no RoleBinding in apps
 ```
 
+The kubeconfig's context defaults to the namespace `apps`, so the commands below omit `-n`.
+
 ## Build and push
 
 Commit first, and tag the image with the commit, so every image maps to code. Never reuse a tag.
 
 ```sh
 APP=crm   # lowercase letters, digits and dashes; also the hostname
+git diff --quiet HEAD || { echo 'Commit first'; exit 1; }   # the tag must match the code
 IMAGE=registry.registry.svc:5000/$APP:$(git rev-parse --short HEAD)
 buildctl --addr tcp://buildkitd.buildkit.svc.cluster.local:1234 \
   --tlscacert ~/.buildkit/ca.crt --tlscert ~/.buildkit/tls.crt --tlskey ~/.buildkit/tls.key \
@@ -100,11 +104,16 @@ spec:
 ```
 
 - The cluster enforces Pod Security `restricted`: keep the two `securityContext` blocks, and use
-  an image that runs as a non-root user and listens on a port above 1024.
+  an image that works as UID 1000 (or set `runAsUser` to the image's numeric UID) and listens on
+  a port above 1024. For static files, `FROM busybox` with `USER 1000:1000` and
+  `CMD ["httpd", "-f", "-p", "8080", "-h", "/www"]` works.
+- The app must answer `GET /healthz` with a 2xx status, or change `readinessProbe.httpGet.path`
+  to a path it serves. Until the probe passes, the pod gets no traffic and the rollout times out.
 - The Ingress needs no `tls` section or Secret: Traefik serves every app with the wildcard
   certificate and redirects HTTP to HTTPS. It covers one level, `crm.$APPS_DOMAIN`, not
   `a.crm.$APPS_DOMAIN`.
-- Set requests and a memory limit on every container, the limit at least the request. A
+- Set requests and a memory limit on every container, the limit at least the request, sized to
+  the app: a static site needs about 10m CPU and 32Mi. A
   container without them gets 50m and 128Mi, and one with a memory request over 128Mi but no
   limit is refused. Apps share a quota (`kubectl describe quota apps`); a pod over it is refused.
 - State that must survive a restart goes in a PersistentVolumeClaim, with `strategy: {type:
@@ -148,7 +157,7 @@ shows only the keys and sizes, while `kubectl get secret -o yaml` shows the valu
   tab, where they type the value at a hidden prompt:
 
   ```sh
-  read -rsp 'Value: ' V; printf '\n'; kubectl -n apps create secret generic crm-stripe --from-literal=STRIPE_KEY="$V"; unset V
+  read -rsp 'Value: ' V; printf '\n'; kubectl create secret generic crm-stripe --from-literal=STRIPE_KEY="$V"; unset V
   ```
 
 Give each provided value its own Secret, so replacing it means deleting and creating only that
