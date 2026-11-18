@@ -141,8 +141,6 @@ Done. The orbs and the apps platform are installed.
 The DNS record for the apps, at your DNS provider (on Cloudflare, DNS only, not proxied):
   *.$APPS_DOMAIN  A  $ip
 
-To let a user's orbs deploy apps (docs/reference.md, Apps platform):
-  kubectl -n apps create rolebinding amp-<name> --role=agent --user=amp:<Amp user ID>
-  ./platform/agent-kubeconfig.sh | amp secrets set APPS_KUBECONFIG --workspace --env --data-file -
-  printf $APPS_DOMAIN | amp secrets set APPS_DOMAIN --workspace --env --data-file -
+To let a user's orbs deploy apps, follow the README's step 5: a RoleBinding per user, and the
+environment variables APPS_KUBECONFIG (./platform/agent-kubeconfig.sh) and APPS_DOMAIN=$APPS_DOMAIN.
 EOF

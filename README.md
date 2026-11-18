@@ -4,8 +4,9 @@ Run [Amp orbs](https://ampcode.com/docs/orbs/self-hosted) on your own machines: 
 cluster of 1 to 10 Linux servers, such as a homelab. Threads you start on this provider run in
 gVisor sandboxes on your hardware. A paused orb keeps its memory, so its processes are still
 running when you come back. Its snapshot is kept on the node for a day and in an encrypted store
-on local disk or your NAS. The cluster only connects out to ampcode.com and needs no inbound
-ports.
+on local disk or your NAS. The cluster only connects out to ampcode.com: Amp needs no inbound
+ports. On a machine with a public IP, firewall everything but SSH from the internet, because K3s
+listens on 6443 and 10250.
 
 It uses Amp's official [orb-provider chart](https://ampcode.com/docs/orbs/self-hosted/kubernetes)
 and shrinks it for small machines with a Helm post-renderer: a 5 GiB Postgres instead of 500 GiB,
@@ -30,11 +31,15 @@ variable that already holds it. Never print a credential's value.
 
 ### Ask the user
 
-1. **The machines**, and how to reach a root shell on each: SSH (host and user), or this thread
-   already running on the server. For SSH, generate a key pair in your workspace and give the
-   user the public key to add to `/root/.ssh/authorized_keys`. Which machine is the K3s server
-   (the one with the most memory).
-2. **Orbs only, or with the apps platform.** For the apps platform also:
+1. **The machines**, and how to reach a root shell on each: SSH (host, user, and a private key
+   the user puts in your workspace, or a key pair you generate whose public key the user adds to
+   `/root/.ssh/authorized_keys`), or this thread already running on the server, as root or with
+   sudo. Which machine is the K3s server (the one with the most memory). Which branch or tag of
+   this repo to install, if not `main`.
+2. **The orb provider.** Its name, such as `homelab`. Tell the user they will confirm creating
+   it in a dialog, or, if that is refused (see step 3), create it themselves, and that they add
+   its orb types in Settings (step 3).
+3. **Orbs only, or with the apps platform.** For the apps platform also:
    - A domain for the apps, such as `apps.example.com`, in a zone on Cloudflare.
    - A Cloudflare API token with Zone → DNS → Edit and Zone → Zone → Read on that zone, stored as
      `CLOUDFLARE_API_TOKEN`.
@@ -45,7 +50,7 @@ variable that already holds it. Never print a credential's value.
    - A Tailscale [OAuth client](https://login.tailscale.com/admin/settings/oauth) with the
      Devices Core and Auth Keys write scopes and the tag `tag:k8s-operator`, stored as
      `TS_OAUTH_CLIENT_ID` and `TS_OAUTH_CLIENT_SECRET`.
-3. **Optional: a NAS** for paused orbs, as an NFS export (server and path) writable by root or
+4. **Optional: a NAS** for paused orbs, as an NFS export (server and path) writable by root or
    squashed to a user who can write. Without one they stay on the server's disk.
 
 ### 1. Check the machines
@@ -55,7 +60,7 @@ Each machine needs Linux x86_64 with cgroup v2 and user namespaces, **kernel 6.7
 memory or more: each running orb reserves its size plus 128 MiB. On every machine:
 
 ```sh
-git clone https://github.com/meln1k/amp-k3s-orb-provider /root/amp-k3s-orb-provider
+git clone -b <branch or tag, default main> https://github.com/meln1k/amp-k3s-orb-provider /root/amp-k3s-orb-provider
 cd /root/amp-k3s-orb-provider && ./node-prep.sh server   # on the server
 cd /root/amp-k3s-orb-provider && ./node-prep.sh          # on every other machine
 ```
@@ -64,8 +69,9 @@ cd /root/amp-k3s-orb-provider && ./node-prep.sh          # on every other machin
 
 ### 2. Install K3s
 
-Set `node-ip` to each machine's LAN IPv4 address; without it, K3s exits when the router hands
-out a new IPv6 prefix.
+Set `node-ip` to the IPv4 address each machine is reached at by the others: its LAN address at
+home, its public address on a single cloud server. Without it, K3s exits when the network hands
+out a new IPv6 prefix. Between machines, allow 6443/tcp, 8472/udp and 10250/tcp.
 
 ```sh
 # server
@@ -80,11 +86,16 @@ Copy the node token between machines without printing it.
 
 ### 3. Create the orb provider in Amp
 
-Create it with `manage_amp` (topic `orb_providers`, operation `create`, scope `personal`, a name
-such as `homelab`); the user confirms in a dialog. The token is saved in this machine's Amp CLI
+Create it with `manage_amp` (topic `orb_providers`, operation `create`, scope `personal`, the
+name from the user); the user confirms in a dialog. The token is saved in this machine's Amp CLI
 storage, `~/.local/share/amp/secrets.json`, under the key that starts with
 `orb-provider-token@`. Copy it to the server as `/root/orb-provider-token` (mode 600) without
 printing it, for example `jq -r '<that key>' … | ssh root@<server> 'umask 077; cat > /root/orb-provider-token'`.
+
+In an Amp orb, `create` is refused ("executor cannot save a provider token"). Then ask the user
+to click **Add Provider** in [Settings → Orbs](https://ampcode.com/settings/orbs), and store the
+`aop_live_…` token it shows with the masked dialog as `ORB_PROVIDER_TOKEN`. Pass it to
+`install.sh` from your environment as in step 4.
 
 Then ask the user to open [Settings → Orbs](https://ampcode.com/settings/orbs), edit the
 provider, and add these orb types with `small` as the default; their names must match
@@ -107,7 +118,7 @@ on every machine. Then, on the server, as root:
 ```sh
 cd /root/amp-k3s-orb-provider
 curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash   # Helm 3, not 4
-ORB_PROVIDER_TOKEN=$(cat /root/orb-provider-token) ./install.sh --orbs-only
+ORB_PROVIDER_TOKEN=$(cat /root/orb-provider-token) ./install.sh --orbs-only   # or from your env
 ```
 
 For the apps platform, drop `--orbs-only` and also pass `APPS_DOMAIN`, `CLOUDFLARE_API_TOKEN`,
