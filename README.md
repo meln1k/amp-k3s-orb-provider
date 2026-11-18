@@ -39,7 +39,8 @@ its hidden prompt. In the second case, continue from step 5, reading the Cloudfl
 
 The commands below assume a root shell. With sudo instead, prefix them with `sudo`, use
 `sudo k3s kubectl` for kubectl, and pass credentials to `install.sh` on standard input as over
-SSH (step 4), with `sudo bash -c` in place of `ssh`.
+SSH (step 4), with `sudo bash -c` in place of `ssh`:
+`{ printf 'export ORB_PROVIDER_TOKEN=%q\n' "$(sudo cat /root/orb-provider-token)"; … } | sudo bash -c 'set -a; . /dev/stdin; cd /root/amp-k3s-orb-provider && ./install.sh'`.
 
 ### Ask the user
 
@@ -53,7 +54,9 @@ message before step 1, including the Tailscale policy and OAuth client.
    this repo to install, if not `main`.
 2. **The orb provider.** Its name, such as `homelab`. Tell the user they will confirm creating
    it in a dialog, or, if that is refused (see step 3), create it themselves, and that they add
-   its orb types in Settings (step 3).
+   its orb types in Settings (step 3). If the user already has one, reuse it: ask where its token
+   is (such as `/root/orb-provider-token`), skip `create` in step 3, and check its orb types with
+   `manage_amp` (topic `orb_providers`, operation `list`) now, so any fix goes in this message.
 3. **Orbs only, or with the apps platform.** For the apps platform also:
    - A domain for the apps, such as `apps.example.com`, in a zone on Cloudflare.
    - A Cloudflare API token with Zone → DNS → Edit and Zone → Zone → Read on that zone, stored as
@@ -140,7 +143,8 @@ on every machine. Then, on the server, as root:
 
 ```sh
 cd /root/amp-k3s-orb-provider
-curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash   # Helm 3, not 4
+helm version --short | grep -q '^v3\.' ||   # Helm 3, not 4
+  curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
 ORB_PROVIDER_TOKEN=$(cat /root/orb-provider-token) ./install.sh --orbs-only   # or from your env
 ```
 
@@ -152,7 +156,9 @@ SSH on standard input, not on the command line, for example
 [`install.sh`](install.sh) creates `s3.env` and `snapshots.key`, makes a Secret of each
 credential, installs Amp's chart pinned to the tested version, and, for the apps platform, applies
 [`platform/`](platform) and waits for the wildcard certificate and Traefik's tailnet address.
-It can run again; a second run is an upgrade. A first install takes 5 to 15 minutes.
+It can run again; a second run is an upgrade. A first install takes 5 to 15 minutes, and it prints
+nothing for 2 to 3 minutes while Helm waits for the pods: run it in the background and watch
+`kubectl get pods -A`.
 
 `snapshots.key` encrypts every paused orb. **Tell the user to copy
 `/root/amp-k3s-orb-provider/snapshots.key` somewhere safe**; without it the paused orbs are lost.
@@ -163,21 +169,26 @@ Skip this with `--orbs-only`.
 
 1. Create the record `install.sh` printed, `*.<domain>  A  <100.x address>`, DNS only (not
    proxied), with the Cloudflare API: the zone's ID from `GET /zones?name=<zone>`, then
-   `POST /zones/<zone ID>/dns_records` with
+   `GET /zones/<zone ID>/dns_records?name=*.<domain>`. A reinstall gives Traefik a new address,
+   so if the record exists, `PATCH /zones/<zone ID>/dns_records/<record ID>`; otherwise
+   `POST /zones/<zone ID>/dns_records`. The body is
    `{"type": "A", "name": "*.<domain>", "content": "<100.x address>", "proxied": false}`. Send the
-   token as a header read from standard input (`curl -H @-`), not on the command line. Check with
-   `dig +short x.<domain>`.
+   token from standard input, not on the command line:
+   `printf 'Authorization: Bearer %s\n' "$TOKEN" | curl -H @- -H 'Content-Type: application/json' …`.
+   Check with `dig +short x.<domain>`.
 2. Give the user's orbs access to the `apps` namespace. Their Kubernetes user is
    `amp:<Amp user ID>`, a `user_…` ID. In the user's own orb it is `$AMP_USER_ID`; on a runner
    or the user's machine, `.accounts[].userID` in `~/.local/share/amp/accounts.json`.
 
    ```sh
-   kubectl -n apps create rolebinding amp-<name> --role=agent --user=amp:<Amp user ID>
+   kubectl -n apps create rolebinding amp-<Amp username> --role=agent --user=amp:<Amp user ID>
    ```
 
 3. Store `./platform/agent-kubeconfig.sh`'s output as the environment variable `APPS_KUBECONFIG`
    and the domain as `APPS_DOMAIN`, with `manage_amp` (topic `environment_variables`, operation
-   `set`, scope `personal`). Neither holds a credential.
+   `set`, scope `personal`). Neither holds a credential. If they already exist, overwrite them:
+   a K3s reinstall gives the cluster a new CA. Running orbs pick up the change after
+   `amp orb restart-processes`.
 4. Tell the user to add [`skills/deploying-k3s-apps`](skills/deploying-k3s-apps/SKILL.md) to their
    skills, and that only threads on this provider can deploy: the cluster's API is reachable only
    from inside it.
