@@ -27,9 +27,21 @@ at once at the start. Never ask for a credential in chat: store it with `manage_
 `secrets`, operation `set`, scope `personal`, without `generated_value`), which opens a masked
 dialog. The value then reaches the user's orbs as an environment variable, after
 `amp orb restart-processes` in an orb that is already running. Before asking, check `env` for a
-variable that already holds it. Never print a credential's value.
+variable that already holds it, under any name. Never print a credential's value.
+
+Personal secrets reach only orbs. When this thread runs on a runner or the user's own machine,
+its environment has none of them. Then have the user run `install.sh` (step 4) on the server in a
+terminal and type each credential at its hidden prompt; continue from step 5, reading the
+Cloudflare token from `kubectl -n cert-manager get secret cloudflare-api-token` without printing
+it.
+
+The commands below assume a root shell. With sudo instead, prefix them with `sudo`, and use
+`sudo k3s kubectl` for kubectl.
 
 ### Ask the user
+
+Even when the user's request already answers some of these, list every missing item in one
+message before step 1, including the Tailscale policy and OAuth client.
 
 1. **The machines**, and how to reach a root shell on each: SSH (host, user, and a private key
    the user puts in your workspace, or a key pair you generate whose public key the user adds to
@@ -42,7 +54,8 @@ variable that already holds it. Never print a credential's value.
 3. **Orbs only, or with the apps platform.** For the apps platform also:
    - A domain for the apps, such as `apps.example.com`, in a zone on Cloudflare.
    - A Cloudflare API token with Zone → DNS → Edit and Zone → Zone → Read on that zone, stored as
-     `CLOUDFLARE_API_TOKEN`.
+     a personal secret such as `CLOUDFLARE_API_TOKEN`; pass it to `install.sh` as
+     `CLOUDFLARE_API_TOKEN` whatever its name.
    - In the [tailnet policy](https://login.tailscale.com/admin/acls), `"tag:k8s-operator": []` and
      `"tag:k8s": ["tag:k8s-operator"]` under `tagOwners`, and a grant that lets the user reach
      the apps, such as
@@ -88,8 +101,9 @@ Copy the node token between machines without printing it.
 
 Create it with `manage_amp` (topic `orb_providers`, operation `create`, scope `personal`, the
 name from the user); the user confirms in a dialog. The token is saved in this machine's Amp CLI
-storage, `~/.local/share/amp/secrets.json`, under the key that starts with
-`orb-provider-token@`. Copy it to the server as `/root/orb-provider-token` (mode 600) without
+storage, `~/.local/share/amp/secrets.json`, under the key `orb-provider-token@<Amp URL>`, such as
+`orb-provider-token@https://ampcode.com/`. There is one per Amp URL, so creating another provider
+replaces the previous one's token on this machine: copy it right away. Copy it to the server as `/root/orb-provider-token` (mode 600) without
 printing it, for example `jq -r '<that key>' … | ssh root@<server> 'umask 077; cat > /root/orb-provider-token'`.
 
 In an Amp orb, `create` is refused ("executor cannot save a provider token"). Then ask the user
@@ -111,7 +125,8 @@ provider, and add these orb types with `small` as the default; their names must 
 
 ### 4. Install
 
-With a NAS, first set its server and path in [`nas-patch.yaml`](nas-patch.yaml), uncomment
+With a NAS, first check the export (mount it, create a file as root, unmount), then set its
+server and path in [`nas-patch.yaml`](nas-patch.yaml), uncomment
 `- path: nas-patch.yaml` in [`kustomization.yaml`](kustomization.yaml), and install `nfs-common`
 on every machine. Then, on the server, as root:
 
@@ -141,7 +156,8 @@ Skip this with `--orbs-only`.
 1. Create the record `install.sh` printed, `*.<domain>  A  <100.x address>`, with the
    Cloudflare token (DNS only, not proxied).
 2. Give the user's orbs access to the `apps` namespace. Their Kubernetes user is
-   `amp:<Amp user ID>`; in the user's own orb that ID is `$AMP_USER_ID`.
+   `amp:<Amp user ID>`; in the user's own orb that ID is `$AMP_USER_ID`, elsewhere use
+   `get_current_user_identity` from the `amp` tools.
 
    ```sh
    kubectl -n apps create rolebinding amp-<name> --role=agent --user=amp:<Amp user ID>
