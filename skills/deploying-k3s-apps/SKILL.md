@@ -15,6 +15,8 @@ Deploy only when the user asks for a deploy; a request to commit or push code is
 
 ## Setup, once per orb
 
+The kubeconfig's namespace is `apps`, so the commands in this skill omit `-n`.
+
 ```sh
 : "${APPS_KUBECONFIG:?Set APPS_KUBECONFIG in Amp environment variables (platform/agent-kubeconfig.sh)}"
 : "${APPS_DOMAIN:?Set APPS_DOMAIN in Amp environment variables, such as apps.example.com}"
@@ -22,8 +24,8 @@ mkdir -p ~/.kube ~/.buildkit
 # No credential in it: kubectl gets a fresh token from `amp orb id-token` per command.
 (umask 077; printf '%s' "$APPS_KUBECONFIG" > ~/.kube/config)
 command -v kubectl >/dev/null || {
-  # must be within one minor version of the server (`kubectl version`); if not, install again
-  # with stable-1.<server minor>.txt in place of stable.txt
+  # afterwards `kubectl version`: if the client is more than one minor version from the server,
+  # run these two lines again with stable-1.<server minor>.txt in place of stable.txt
   curl -fsSLo /tmp/kubectl "https://dl.k8s.io/release/$(curl -fsSL https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
   sudo install /tmp/kubectl /usr/local/bin/kubectl; }
 command -v buildctl >/dev/null ||
@@ -37,13 +39,11 @@ kubectl auth whoami                   # amp:<your Amp user ID>
 kubectl auth can-i create deployments # yes; "no" means the user has no RoleBinding in apps
 ```
 
-The kubeconfig's namespace is `apps`, so the commands below omit `-n`.
-
 ## Build and push
 
 Each image is tagged with the commit it was built from, so commit first and never reuse a tag. A
-new app gets its own directory in the workspace, with `git init`; set `user.name` and `user.email`
-if `git commit` refuses.
+new app gets its own directory in the workspace, such as `<workspace>/<app>`, with `git init`;
+run the commands below from it, and set `user.name` and `user.email` if `git commit` refuses.
 
 ```sh
 APP=crm   # lowercase letters, digits and dashes; also the hostname
@@ -52,7 +52,8 @@ IMAGE=registry.registry.svc:5000/$APP:$(git rev-parse --short HEAD)
 buildctl --addr tcp://buildkitd.buildkit.svc.cluster.local:1234 \
   --tlscacert ~/.buildkit/ca.crt --tlscert ~/.buildkit/tls.crt --tlskey ~/.buildkit/tls.key \
   build --frontend dockerfile.v0 --local context=. --local dockerfile=. \
-  --output "type=image,name=$IMAGE,push=true"
+  --output "type=image,name=$IMAGE,push=true" --metadata-file /tmp/$APP-build.json
+jq -r '."containerimage.digest"' /tmp/$APP-build.json   # the pushed digest
 ```
 
 Build steps reach the internet, where base images come from, but not the LAN or the cluster. Only
@@ -104,9 +105,16 @@ spec:
 ```
 
 - Pod Security is `restricted`: keep both `securityContext` blocks, and use an image that works as
-  UID 1000 (or set `runAsUser` to its numeric UID) and listens above port 1024. A static site:
-  `FROM busybox:1.37`, `COPY www /www`, `USER 1000:1000`,
-  `CMD ["httpd", "-f", "-p", "8080", "-h", "/www"]`, and a file `www/healthz` such as `ok`.
+  UID 1000 (or set `runAsUser` to its numeric UID) and listens above port 1024. A static site
+  keeps its pages in `www/`, with a file `www/healthz` containing `ok`, and this Dockerfile:
+
+  ```dockerfile
+  FROM busybox:1.37
+  COPY www /www
+  USER 1000:1000
+  CMD ["httpd", "-f", "-p", "8080", "-h", "/www"]
+  ```
+
 - The pod gets traffic, and the rollout finishes, only once `GET /healthz` returns 2xx; point the
   `readinessProbe` at another path if the app serves that instead.
 - Give every container requests and a memory limit of at least the request. Without them it gets
@@ -128,13 +136,14 @@ sed -e "s#__APP__#$APP#g" -e "s#__IMAGE__#$IMAGE#" -e "s#__HOST__#$APP.$APPS_DOM
 kubectl annotate deploy/$APP kubernetes.io/change-cause="$IMAGE" --overwrite
 kubectl rollout status deploy/$APP --timeout=3m
 curl -fsS "https://$APP.$APPS_DOMAIN/healthz"
-# registry…/$APP@sha256:…, must match the digest buildctl pushed
+# registry…/$APP@sha256:…, the digest in /tmp/$APP-build.json
 kubectl get pod -l app=$APP -o jsonpath='{.items[*].status.containerStatuses[*].imageID}'
 ```
 
 Then open the page or call the endpoint the change affects, and for an app with a
 PersistentVolumeClaim check that its data is still there. Tell the user the URL, the image and its
-commit, and what you checked. Users open the URL over the tailnet only; from the orb it resolves to
+commit, and what you checked; if the repository has no remote, say that the commit and
+`deploy/k8s.yaml` exist only in this orb. Users open the URL over the tailnet only; from the orb it resolves to
 Traefik inside the cluster.
 
 If the rollout stalls, read `kubectl describe pod -l app=$APP`, `kubectl logs deploy/$APP` and

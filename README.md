@@ -63,7 +63,7 @@ anything that `cd`s into `/root/amp-k3s-orb-provider` inside `sudo bash -c '…'
 
 Each machine needs Linux x86_64 with cgroup v2 and user namespaces, **kernel 6.7+ or 6.6.23+**
 (Ubuntu 24.04 and Debian 13 work, Debian 12 does not), outbound HTTPS, and 16 GB of memory or
-more: each running orb reserves its size plus 128 MiB. On a machine with a public IP, firewall
+more (`free -g` shows 15): each running orb reserves its size plus 128 MiB. On a machine with a public IP, firewall
 everything but SSH from the internet: K3s listens on 6443 and 10250.
 
 ```sh
@@ -109,16 +109,16 @@ these types, `small` the default, named as `workers.types` in [`values.yaml`](va
 | `large` | 8 | 16 GiB |
 | `xxlarge` | 16 | 32 GiB |
 
-Check with `manage_amp` (topic `orb_providers`, operation `list`) that the types are exactly
-these, with `small` the default: an orb of a misspelled type never starts. Amp cannot rename a
+Check with `manage_amp` (topic `orb_providers`, operation `list`) that the type names are exactly
+these, with `small` the default (`list` shows no CPU or memory): an orb of a misspelled type never starts. Amp cannot rename a
 type; the user adds the right one and removes the wrong one.
 
 ### 4. Install
 
-With a NAS: mount the export, create and delete a file as root, and unmount (on a squashed export
-the file belongs to the anonymous user, which is fine). Then set its server and path in
-[`nas-patch.yaml`](nas-patch.yaml), uncomment `- path: nas-patch.yaml` in
-[`kustomization.yaml`](kustomization.yaml), and install `nfs-common` on every machine.
+With a NAS: install `nfs-common` on every machine, then on the server mount the export, create
+and delete a file as root, and unmount (on a squashed export the file belongs to the anonymous
+user, which is fine). Set its server and path in [`nas-patch.yaml`](nas-patch.yaml) and uncomment
+`- path: nas-patch.yaml` in [`kustomization.yaml`](kustomization.yaml).
 
 On the server, install Helm 3 if `helm version --short` is not v3 (Helm 4 cannot run the
 post-renderer): `curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash`.
@@ -144,7 +144,7 @@ second run upgrades.
 Skip this with `--orbs-only`.
 
 1. **DNS.** Point `*.<domain>` at the 100.x address `install.sh` printed, DNS only (not proxied),
-   with the Cloudflare API: the zone ID from `GET /zones?name=<zone>`, then
+   with the Cloudflare API: the ID of the zone holding the domain from `GET /zones?name=<zone>`, then
    `GET /zones/<zone ID>/dns_records?name=*.<domain>`. A reinstall changes the address, so
    `PATCH /zones/<zone ID>/dns_records/<record ID>` an existing record, else
    `POST /zones/<zone ID>/dns_records`, with
@@ -161,15 +161,17 @@ Skip this with `--orbs-only`.
    kubectl -n apps create rolebinding amp-<Amp username> --role=agent --user=amp:<Amp user ID>
    ```
 
-3. **Environment.** Store `./platform/agent-kubeconfig.sh`'s output as `APPS_KUBECONFIG` and the
-   domain as `APPS_DOMAIN` with `manage_amp` (topic `environment_variables`, operation `set`,
-   scope `personal`; neither is a credential). Overwrite existing ones: a K3s reinstall changes the
+3. **Environment.** Store `./platform/agent-kubeconfig.sh`'s output, one line of JSON passed
+   unchanged, as `APPS_KUBECONFIG` and the domain as `APPS_DOMAIN` with `manage_amp` (topic
+   `environment_variables`, operation `set`, scope `personal`; neither is a credential), and read
+   `APPS_KUBECONFIG` back with operation `get` to compare it with the script's output. Overwrite existing ones: a K3s reinstall changes the
    cluster's CA. Orbs load them after `amp orb restart-processes`, runner threads after the runner
    restarts.
 
 ### 6. Check and report
 
-On the server, every pod in `amp-orbs` and `ate-system` is Running and
+On the server, every pod in `amp-orbs` and `ate-system` is Running (with a NAS,
+`kubectl -n ate-system get pvc` lists no `snapshots-data`), and
 `kubectl -n amp-orbs logs deploy/amp-orb-provider -c spawner` shows `Orb provider started`. With
 the apps platform, also every pod in `cert-manager`, `tailscale`, `traefik`, `registry` and
 `buildkit` is Running, `kubectl -n traefik get certificate wildcard` is Ready, `x.<domain>`
