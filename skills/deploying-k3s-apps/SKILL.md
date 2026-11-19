@@ -24,13 +24,14 @@ mkdir -p ~/.kube ~/.buildkit
 # No credential in it: kubectl gets a fresh token from `amp orb id-token` per command.
 (umask 077; printf '%s' "$APPS_KUBECONFIG" > ~/.kube/config)
 command -v kubectl >/dev/null || {
-  # afterwards `kubectl version`: if the client is more than one minor version from the server,
-  # run these two lines again with stable-1.<server minor>.txt in place of stable.txt
   curl -fsSLo /tmp/kubectl "https://dl.k8s.io/release/$(curl -fsSL https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
   sudo install /tmp/kubectl /usr/local/bin/kubectl; }
 command -v buildctl >/dev/null ||
   curl -fsSL https://github.com/moby/buildkit/releases/download/v0.35.0/buildkit-v0.35.0.linux-amd64.tar.gz |
   sudo tar xz -C /usr/local bin/buildctl
+# Client within one minor version of the server; if not, install kubectl again as above with
+# stable-1.<server minor>.txt in place of stable.txt.
+kubectl version
 # BuildKit accepts only clients with this certificate.
 (umask 077; for f in ca.crt tls.crt tls.key; do
   kubectl get secret buildkit-client -o go-template="{{index .data \"$f\" | base64decode}}" > ~/.buildkit/$f
@@ -48,15 +49,18 @@ that repository, such as `Amp` and `amp@localhost`.
 
 ```sh
 APP=crm   # lowercase letters, digits and dashes; also the hostname
-kubectl get deploy/$APP 2>/dev/null   # a new app's name must be free: deploying replaces this one
-test -z "$(git status --porcelain)" || { echo 'Commit first'; exit 1; }   # untracked files too
+kubectl get deploy,svc,ingress $APP --ignore-not-found   # a new app: must print nothing
 IMAGE=registry.registry.svc:5000/$APP:$(git rev-parse --short HEAD)
-buildctl --addr tcp://buildkitd.buildkit.svc.cluster.local:1234 \
-  --tlscacert ~/.buildkit/ca.crt --tlscert ~/.buildkit/tls.crt --tlskey ~/.buildkit/tls.key \
-  build --frontend dockerfile.v0 --local context=. --local dockerfile=. \
-  --output "type=image,name=$IMAGE,push=true" --metadata-file /tmp/$APP-build.json
-jq -r '."containerimage.digest"' /tmp/$APP-build.json   # the pushed digest
+if [ -n "$(git status --porcelain)" ]; then echo 'Commit first (untracked files too)'; else
+  buildctl --addr tcp://buildkitd.buildkit.svc.cluster.local:1234 \
+    --tlscacert ~/.buildkit/ca.crt --tlscert ~/.buildkit/tls.crt --tlskey ~/.buildkit/tls.key \
+    build --frontend dockerfile.v0 --local context=. --local dockerfile=. \
+    --output "type=image,name=$IMAGE,push=true" --metadata-file /tmp/$APP-build.json
+  jq -r '."containerimage.digest"' /tmp/$APP-build.json   # the pushed digest
+fi
 ```
+
+Deploying an existing name replaces that app.
 
 Build steps reach the internet, where base images come from, but not the LAN or the cluster. Only
 BuildKit and the nodes reach the registry, not the orb.
@@ -143,8 +147,8 @@ test "$(kubectl get pod -l app=$APP -o jsonpath='{range .items[*]}{.status.conta
 ```
 
 Then fetch the page or endpoint the change affects with `curl -fsS https://$APP.$APPS_DOMAIN/<path>`
-and check its content (for a UI change, also take a screenshot), and for an app with a
-PersistentVolumeClaim check that its data is still there. Tell the user the URL, the image and its
+and check its content (for a UI change, also take a screenshot with agent-browser and look at
+it), and for an app with a PersistentVolumeClaim check that its data is still there. Tell the user the URL, the image and its
 commit, and what you checked; if the repository has no remote, say that the commit and
 `deploy/k8s.yaml` exist only in this orb. Users open the URL over the tailnet only; from the orb
 it resolves to Traefik inside the cluster.

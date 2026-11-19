@@ -75,6 +75,7 @@ kubectl get --raw /version >/dev/null || die "cannot reach the cluster; set KUBE
 if ! $orbs_only; then
 	# On an upgrade, the domain the wildcard certificate was issued for.
 	: "${APPS_DOMAIN:=$(kubectl -n traefik get certificate wildcard -o jsonpath='{.spec.dnsNames[0]}' 2>/dev/null || true)}"
+	APPS_DOMAIN=${APPS_DOMAIN#\*.} # also when the certificate was cut to the wildcard alone
 	[ -n "$APPS_DOMAIN" ] || die "set APPS_DOMAIN, such as APPS_DOMAIN=apps.example.com $0, or pass --orbs-only"
 	[[ $APPS_DOMAIN =~ ^([a-z0-9]([a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}$ ]] ||
 		die "APPS_DOMAIN must be a lowercase domain name, such as apps.example.com"
@@ -136,7 +137,8 @@ ip=$(ip_of_traefik)
 echo "waiting for the wildcard certificate (DNS-01 takes a few minutes)"
 kubectl -n traefik wait --for=condition=Ready certificate/wildcard --timeout=10m >/dev/null ||
 	die "check the Cloudflare token and: kubectl -n traefik describe certificate wildcard; \
-kubectl get challenges -A"
+kubectl -n traefik describe order; kubectl get challenges -A. A 429 rateLimited order: see Troubleshoot \
+in docs/reference.md"
 
 cat <<EOF
 

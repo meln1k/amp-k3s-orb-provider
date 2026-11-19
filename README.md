@@ -147,7 +147,8 @@ second run upgrades.
 Skip this with `--orbs-only`.
 
 1. **DNS.** Point `*.<domain>` at the 100.x address `install.sh` printed, DNS only (not proxied),
-   with the Cloudflare API: the ID of the zone holding the domain from `GET /zones?name=<zone>`, then
+   with the Cloudflare API: the ID of the zone holding the domain (`example.com` for
+   `apps.example.com`) from `GET /zones?name=<zone>`, then
    `GET /zones/<zone ID>/dns_records?name=*.<domain>`. A reinstall changes the address, so
    `PATCH /zones/<zone ID>/dns_records/<record ID>` an existing record, else
    `POST /zones/<zone ID>/dns_records`, with
@@ -180,8 +181,9 @@ the apps platform, also every pod in `cert-manager`, `tailscale`, `traefik`, `re
 `buildkit` is Running, `kubectl -n traefik get certificate wildcard` is Ready, `x.<domain>`
 resolves to Traefik's 100.x address, and `curl https://x.<domain>` from the tailnet gets Traefik's
 404 with a valid certificate. Last, start a thread on the provider with `create_thread`
-(`orb_provider` its name, `orb_size` `small`) that runs `uname -a`; its answer shows that this
-cluster serves the provider.
+(`orb_provider` its name, `orb_size` `small`, `project` `no-project`) that runs `uname -a`. Its
+first spawn takes about 1.5 minutes; when the spawner log shows `Orb spawned` for
+`amp-<its thread ID without T->`, this cluster serves the provider.
 
 If something fails, read [Troubleshoot](docs/reference.md#troubleshoot) and the section of
 [docs/reference.md](docs/reference.md) for that part before changing anything.

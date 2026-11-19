@@ -420,6 +420,17 @@ kubectl -n amp-orbs logs deploy/amp-orb-provider -c provider
 kubectl -n amp-orbs logs deploy/amp-orb-provider -c spawner
 ```
 
+If the wildcard certificate stays pending and `kubectl -n traefik describe order` shows
+`429 rateLimited`, Let's Encrypt has already issued 5 certificates this week for the same names,
+which happens after several reinstalls on one domain. Wait until the retry time it gives, or
+issue the wildcard alone, a different set of names with its own limit:
+
+```sh
+kubectl -n traefik patch certificate wildcard --type=merge -p '{"spec":{"dnsNames":["*.<domain>"]}}'
+```
+
+The next `install.sh` run restores both names, so run it only after the retry time.
+
 To replace the provider token in the cluster:
 
 ```sh
