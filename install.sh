@@ -7,7 +7,8 @@
 #
 # It creates the gitignored s3.env and snapshots.key if they are missing. Each credential the
 # cluster does not have yet comes from its environment variable or, without one, a hidden prompt:
-#   ORB_PROVIDER_TOKEN                         the orb provider's token from Amp
+#   ORB_PROVIDER_TOKEN                         the orb provider's token from Amp, or the file
+#                                              /root/orb-provider-token
 #   TS_OAUTH_CLIENT_ID, TS_OAUTH_CLIENT_SECRET a Tailscale OAuth client (apps platform)
 #   CLOUDFLARE_API_TOKEN                       DNS edit on the apps' zone (apps platform)
 set -euo pipefail
@@ -88,6 +89,9 @@ fi
 if [ ! -e snapshots.key ]; then
 	(umask 077; openssl rand -base64 32 >snapshots.key)
 	echo "created snapshots.key: keep a copy outside the cluster, or paused orbs are lost with it"
+fi
+if [ -z "${ORB_PROVIDER_TOKEN:-}" ] && [ -r /root/orb-provider-token ]; then
+	ORB_PROVIDER_TOKEN=$(cat /root/orb-provider-token)
 fi
 ensure_secret amp-orbs amp-orb-spawner \
 	AMP_ORB_PROVIDER_TOKEN=ORB_PROVIDER_TOKEN='Amp provider token (aop_live_…)'

@@ -1,19 +1,17 @@
 ---
 name: deploying-k3s-apps
-description: Builds, pushes, deploys and rolls back long-running apps on a self-hosted K3s cluster (namespace apps, served by Traefik at https://<app>.$APPS_DOMAIN). Use when asked to deploy, ship, update, roll back, debug or remove an app on the K3s cluster, or to give an app a hostname there.
+description: Builds, deploys, rolls back and removes long-running apps on the self-hosted K3s cluster, served at https://<app>.$APPS_DOMAIN. Use when asked to deploy, update, roll back, debug or remove an app there, or to give an app a hostname.
 ---
 
 # Deploying apps to the K3s cluster
 
-Each app is a Deployment, a Service and an Ingress in the namespace `apps`, served by Traefik at
-`https://<app>.$APPS_DOMAIN` with a wildcard certificate. Images are built by BuildKit in the
-cluster and pushed to the cluster's registry. You have rights in `apps` only; you cannot see
-nodes or other namespaces, and the cluster refuses root containers, LoadBalancer and NodePort
-Services, `externalIPs` and Tailscale annotations. Docker inside the orb cannot build or push
-these images.
+An app is a Deployment, a Service and an Ingress in the namespace `apps`. BuildKit in the cluster
+builds its image and pushes it to the cluster's registry, and Traefik serves it at
+`https://<app>.$APPS_DOMAIN` with a wildcard certificate. You have rights in `apps` only. The
+cluster refuses root containers, LoadBalancer and NodePort Services, `externalIPs` and Tailscale
+annotations, and Docker in the orb cannot build or push its images.
 
-Pushing code does not deploy it. Build and deploy only when the user asks for a deploy; a request
-to commit, push or prepare a change is not one.
+Deploy only when the user asks for a deploy; a request to commit or push code is not one.
 
 ## Setup, once per orb
 
@@ -21,11 +19,11 @@ to commit, push or prepare a change is not one.
 : "${APPS_KUBECONFIG:?Set APPS_KUBECONFIG in Amp environment variables (platform/agent-kubeconfig.sh)}"
 : "${APPS_DOMAIN:?Set APPS_DOMAIN in Amp environment variables, such as apps.example.com}"
 mkdir -p ~/.kube ~/.buildkit
-# No credential in it: kubectl mints a fresh Amp ID token with `amp orb id-token` per command.
+# No credential in it: kubectl gets a fresh token from `amp orb id-token` per command.
 (umask 077; printf '%s' "$APPS_KUBECONFIG" > ~/.kube/config)
 command -v kubectl >/dev/null || {
-  # within one minor version of the server: `kubectl version` shows both once it is installed;
-  # if they differ by more, install again with stable-1.<server minor>.txt in place of stable.txt
+  # must be within one minor version of the server (`kubectl version`); if not, install again
+  # with stable-1.<server minor>.txt in place of stable.txt
   curl -fsSLo /tmp/kubectl "https://dl.k8s.io/release/$(curl -fsSL https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
   sudo install /tmp/kubectl /usr/local/bin/kubectl; }
 command -v buildctl >/dev/null ||
@@ -39,13 +37,13 @@ kubectl auth whoami                   # amp:<your Amp user ID>
 kubectl auth can-i create deployments # yes; "no" means the user has no RoleBinding in apps
 ```
 
-The kubeconfig's context defaults to the namespace `apps`, so the commands below omit `-n`.
+The kubeconfig's namespace is `apps`, so the commands below omit `-n`.
 
 ## Build and push
 
-Commit first, and tag the image with the commit, so every image maps to code. Never reuse a tag.
-For a new app without a repository, create a directory named after the app in the workspace and
-`git init` it; if `git commit` refuses, set `user.name` and `user.email`.
+Each image is tagged with the commit it was built from, so commit first and never reuse a tag. A
+new app gets its own directory in the workspace, with `git init`; set `user.name` and `user.email`
+if `git commit` refuses.
 
 ```sh
 APP=crm   # lowercase letters, digits and dashes; also the hostname
@@ -57,14 +55,13 @@ buildctl --addr tcp://buildkitd.buildkit.svc.cluster.local:1234 \
   --output "type=image,name=$IMAGE,push=true"
 ```
 
-The orb cannot reach the registry itself (it is plain HTTP on port 5000); only BuildKit and the
-nodes use it. The Dockerfile's base images come from public registries. Build steps can reach the
-internet, but not the LAN or the rest of the cluster.
+Build steps reach the internet, where base images come from, but not the LAN or the cluster. Only
+BuildKit and the nodes reach the registry, not the orb.
 
 ## Manifest
 
-Keep it in the app's repository, such as `deploy/k8s.yaml`, with `__APP__`, `__IMAGE__` and
-`__HOST__` where the app name, image and hostname go:
+Keep it in the app's repository as `deploy/k8s.yaml`; Deploy fills in `__APP__`, `__IMAGE__` and
+`__HOST__`:
 
 ```yaml
 apiVersion: apps/v1
@@ -84,7 +81,7 @@ spec:
         ports: [{name: http, containerPort: 8080}]
         readinessProbe: {httpGet: {path: /healthz, port: http}}
         resources:
-          requests: {cpu: 10m, memory: 32Mi}   # size to the app; see below
+          requests: {cpu: 10m, memory: 32Mi}   # a static site; size to the app
           limits: {memory: 64Mi}
         securityContext: {allowPrivilegeEscalation: false, capabilities: {drop: [ALL]}}
 ---
@@ -106,24 +103,20 @@ spec:
       - {path: /, pathType: Prefix, backend: {service: {name: __APP__, port: {name: http}}}}
 ```
 
-- The cluster enforces Pod Security `restricted`: keep the two `securityContext` blocks, and use
-  an image that works as UID 1000 (or set `runAsUser` to the image's numeric UID) and listens on
-  a port above 1024. For static files, `FROM busybox:1.37`, `COPY www /www`, `USER 1000:1000` and
-  `CMD ["httpd", "-f", "-p", "8080", "-h", "/www"]` works, with a file `www/healthz` (such as
-  `ok`) for the readiness probe.
-- The app must answer `GET /healthz` with a 2xx status, or change `readinessProbe.httpGet.path`
-  to a path it serves. Until the probe passes, the pod gets no traffic and the rollout times out.
-- The Ingress needs no `tls` section or Secret: Traefik serves every app with the wildcard
-  certificate and redirects HTTP to HTTPS. It covers one level, `crm.$APPS_DOMAIN`, not
-  `a.crm.$APPS_DOMAIN`.
-- Set requests and a memory limit on every container, the limit at least the request, sized to
-  the app: a static site needs about 10m CPU and 32Mi. A
-  container without them gets 50m and 128Mi, and one with a memory request over 128Mi but no
-  limit is refused. Apps share a quota (`kubectl describe quota apps`); a pod over it is refused.
-- State that must survive a restart goes in a PersistentVolumeClaim, with `strategy: {type:
-  Recreate}` on the Deployment.
-- Credentials go in a Secret, never in the repo or the manifest (see [Secrets](#secrets)).
-- Apps reach each other by Service name and the internet, but not the LAN or the rest of the
+- Pod Security is `restricted`: keep both `securityContext` blocks, and use an image that works as
+  UID 1000 (or set `runAsUser` to its numeric UID) and listens above port 1024. A static site:
+  `FROM busybox:1.37`, `COPY www /www`, `USER 1000:1000`,
+  `CMD ["httpd", "-f", "-p", "8080", "-h", "/www"]`, and a file `www/healthz` such as `ok`.
+- The pod gets traffic, and the rollout finishes, only once `GET /healthz` returns 2xx; point the
+  `readinessProbe` at another path if the app serves that instead.
+- Give every container requests and a memory limit of at least the request. Without them it gets
+  50m and 128Mi; a memory request over 128Mi without a limit is refused, and so is a pod over the
+  shared quota (`kubectl describe quota apps`).
+- The Ingress needs no `tls` section: Traefik serves the wildcard certificate, which covers
+  `<app>.$APPS_DOMAIN` but not `a.<app>.$APPS_DOMAIN`, and redirects HTTP to HTTPS.
+- State that must survive a restart goes in a PersistentVolumeClaim, with
+  `strategy: {type: Recreate}` on the Deployment.
+- Apps reach each other by Service name, and the internet, but not the LAN or the rest of the
   cluster.
 
 ## Deploy
@@ -139,43 +132,37 @@ curl -fsS "https://$APP.$APPS_DOMAIN/healthz"
 kubectl get pod -l app=$APP -o jsonpath='{.items[*].status.containerStatuses[*].imageID}'
 ```
 
-A finished rollout and a healthy `/healthz` do not prove the change works: also open the page or
-call the endpoint the change affects. On a redeploy of an app with a PersistentVolumeClaim, check
-that its existing data is still there. Then tell the user the app's URL, the deployed image and
-its commit, and what you checked.
+Then open the page or call the endpoint the change affects, and for an app with a
+PersistentVolumeClaim check that its data is still there. Tell the user the URL, the image and its
+commit, and what you checked. Users open the URL over the tailnet only; from the orb it resolves to
+Traefik inside the cluster.
 
-From the orb, the app's name resolves to Traefik inside the cluster. Users reach the same URL over
-the tailnet, where it resolves to Traefik's 100.x address, so it works only for people on the
-tailnet.
-
-If the rollout does not finish, read `kubectl describe pod -l app=$APP`, `kubectl logs
-deploy/$APP` and `kubectl get events --sort-by=.lastTimestamp`, then roll back. A first deploy
-has no earlier revision: fix forward, or remove the app.
+If the rollout stalls, read `kubectl describe pod -l app=$APP`, `kubectl logs deploy/$APP` and
+`kubectl get events --sort-by=.lastTimestamp`, then roll back. A first deploy has nothing to roll
+back to: fix forward, or remove the app.
 
 ## Secrets
 
-Keep credentials in Secrets, and pass them to the app with `envFrom: [{secretRef: {name: crm}}]`
-or `valueFrom.secretKeyRef` in the Deployment. Never print a value: `kubectl describe secret`
-shows only the keys and sizes, while `kubectl get secret -o yaml` shows the values.
+Credentials live in Secrets, which the Deployment reads with `envFrom: [{secretRef: {name: <secret>}}]`
+or `valueFrom.secretKeyRef`. Inspect them with `kubectl describe secret`, which shows only keys and
+sizes; never print a value.
 
-- **A value you generate**, such as a session key, goes from the generator straight into the
-  Secret:
+- A value you generate goes straight from the generator into the Secret:
 
   ```sh
   kubectl create secret generic $APP-session --from-literal=SESSION_SECRET="$(openssl rand -hex 32)"
   ```
 
-- **A value the user or a third party provides**, such as an API key, must not pass through the
-  thread. Do not ask for it in chat. Give the user this command to run in the orb's Terminal
-  tab, where they type the value at a hidden prompt:
+- A value the user or a third party provides, such as an API key, stays out of the thread: give
+  the user this command, with the names filled in, to run in the orb's Terminal tab, where they
+  type it at a hidden prompt:
 
   ```sh
-  read -rsp 'Value: ' V; printf '\n'; kubectl create secret generic crm-stripe --from-literal=STRIPE_KEY="$V"; unset V
+  read -rsp 'Value: ' V; printf '\n'; kubectl create secret generic <app>-stripe --from-literal=STRIPE_KEY="$V"; unset V
   ```
 
-Give each provided value its own Secret, so replacing it means deleting and creating only that
-one. An app reads its Secrets when its pods start, so after a change run `kubectl rollout restart
-deploy/$APP`.
+Give each provided value its own Secret, so replacing one touches only it. Pods read Secrets when
+they start: run `kubectl rollout restart deploy/$APP` after a change.
 
 ## Roll back
 
@@ -186,21 +173,21 @@ kubectl rollout undo deploy/$APP --to-revision=3
 kubectl rollout status deploy/$APP --timeout=3m
 ```
 
-`rollout undo` changes only the pod template. The next deploy applies the manifest again, so fix
-forward from the code and deploy as above.
+`rollout undo` changes only the pod template, and the next deploy applies the manifest again, so
+fix the code too.
 
 ## Run on a schedule
 
-Only when the user asks. If the cluster runs the optional downscaler (ask the user; you cannot see
-its namespace), it scales an app to zero outside a time window and back up inside it:
+Only when the user asks, and only if the cluster runs the optional downscaler (ask the user; you
+cannot see it). It scales the app to zero outside the window:
 
 ```sh
 kubectl annotate deploy/$APP downscaler/uptime="Mon-Fri 08:00-20:00 Europe/Berlin" --overwrite
 kubectl annotate deploy/$APP downscaler/uptime-   # run all the time again
 ```
 
-Use the user's time zone, and ask when you do not know it: the orb's clock is UTC. Outside the
-window the app has no pods and its URL does not answer, so deploy and check it inside the window.
+Use the user's time zone (ask if unknown; the orb's clock is UTC), and deploy and check inside the
+window: outside it the URL does not answer.
 
 ## Remove
 
