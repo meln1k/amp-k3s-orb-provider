@@ -37,10 +37,12 @@ runner, or to run `install.sh` (step 4) on the server in a terminal and type eac
 its hidden prompt. In the second case, continue from step 5, reading the Cloudflare token from
 `kubectl -n cert-manager get secret cloudflare-api-token` without printing it.
 
-The commands below assume a root shell. With sudo instead, prefix them with `sudo`, use
-`sudo k3s kubectl` for kubectl, and pass credentials to `install.sh` on standard input as over
-SSH (step 4), with `sudo bash -c` in place of `ssh`:
-`{ printf 'export ORB_PROVIDER_TOKEN=%q\n' "$(sudo cat /root/orb-provider-token)"; … } | sudo bash -c 'set -a; . /dev/stdin; cd /root/amp-k3s-orb-provider && ./install.sh'`.
+The commands below assume a root shell. With sudo instead, prefix them with `sudo`, run those
+that `cd` into `/root/amp-k3s-orb-provider` as `sudo bash -c 'cd /root/amp-k3s-orb-provider && …'`
+(`/root` is mode 700), and use `sudo k3s kubectl` for kubectl. Pass `install.sh` its variables
+on standard input as over SSH (step 4), with `sudo bash -c` in place of `ssh`. sudo drops your
+environment, so put every variable in that block, `APPS_DOMAIN` included:
+`{ printf 'export ORB_PROVIDER_TOKEN=%q\n' "$(sudo cat /root/orb-provider-token)"; printf 'export APPS_DOMAIN=%q\n' '<domain>'; printf 'export CLOUDFLARE_API_TOKEN=%q\n' "$<its variable>"; … } | sudo bash -c 'set -a; . /dev/stdin; cd /root/amp-k3s-orb-provider && ./install.sh'`.
 
 ### Ask the user
 
@@ -136,7 +138,8 @@ right one and removing the wrong one.
 
 ### 4. Install
 
-With a NAS, first check the export (mount it, create a file as root, unmount), then set its
+With a NAS, first check the export (mount it, create and delete a file as root, unmount; on a
+squashed export the file belongs to the anonymous user, which is fine), then set its
 server and path in [`nas-patch.yaml`](nas-patch.yaml), uncomment
 `- path: nas-patch.yaml` in [`kustomization.yaml`](kustomization.yaml), and install `nfs-common`
 on every machine. Then, on the server, as root:
@@ -145,10 +148,10 @@ on every machine. Then, on the server, as root:
 cd /root/amp-k3s-orb-provider
 helm version --short | grep -q '^v3\.' ||   # Helm 3, not 4
   curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
-ORB_PROVIDER_TOKEN=$(cat /root/orb-provider-token) ./install.sh --orbs-only   # or from your env
+ORB_PROVIDER_TOKEN=$(cat /root/orb-provider-token) APPS_DOMAIN=<domain> ./install.sh   # plus the credentials below; add --orbs-only to skip the apps platform
 ```
 
-For the apps platform, drop `--orbs-only` and also pass `APPS_DOMAIN`, `CLOUDFLARE_API_TOKEN`,
+For the apps platform, also pass `CLOUDFLARE_API_TOKEN`,
 `TS_OAUTH_CLIENT_ID` and `TS_OAUTH_CLIENT_SECRET`. Pass credentials from your environment over
 SSH on standard input, not on the command line, for example
 `printf 'export X=%q\n' "$X" … | ssh root@<server> 'set -a; . /dev/stdin; cd …; ./install.sh'`.
@@ -178,7 +181,9 @@ Skip this with `--orbs-only`.
    Check with `dig +short x.<domain>`.
 2. Give the user's orbs access to the `apps` namespace. Their Kubernetes user is
    `amp:<Amp user ID>`, a `user_…` ID. In the user's own orb it is `$AMP_USER_ID`; on a runner
-   or the user's machine, `.accounts[].userID` in `~/.local/share/amp/accounts.json`.
+   or the user's machine, `.accounts[].userID` in `~/.local/share/amp/accounts.json`. The binding's
+   name only labels it: use the user's `ampUsername` from `get_current_user_identity` (module
+   `amp`), or any name.
 
    ```sh
    kubectl -n apps create rolebinding amp-<Amp username> --role=agent --user=amp:<Amp user ID>
@@ -188,7 +193,7 @@ Skip this with `--orbs-only`.
    and the domain as `APPS_DOMAIN`, with `manage_amp` (topic `environment_variables`, operation
    `set`, scope `personal`). Neither holds a credential. If they already exist, overwrite them:
    a K3s reinstall gives the cluster a new CA. Running orbs pick up the change after
-   `amp orb restart-processes`.
+   `amp orb restart-processes`; threads on an `amp --no-tui` runner only after the runner restarts.
 4. Tell the user to add [`skills/deploying-k3s-apps`](skills/deploying-k3s-apps/SKILL.md) to their
    skills, and that only threads on this provider can deploy: the cluster's API is reachable only
    from inside it.

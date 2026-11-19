@@ -24,7 +24,8 @@ mkdir -p ~/.kube ~/.buildkit
 # No credential in it: kubectl mints a fresh Amp ID token with `amp orb id-token` per command.
 (umask 077; printf '%s' "$APPS_KUBECONFIG" > ~/.kube/config)
 command -v kubectl >/dev/null || {
-  # within one minor version of the server: `kubectl version` shows both once it is installed
+  # within one minor version of the server: `kubectl version` shows both once it is installed;
+  # if they differ by more, install again with stable-1.<server minor>.txt in place of stable.txt
   curl -fsSLo /tmp/kubectl "https://dl.k8s.io/release/$(curl -fsSL https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
   sudo install /tmp/kubectl /usr/local/bin/kubectl; }
 command -v buildctl >/dev/null ||
@@ -43,8 +44,8 @@ The kubeconfig's context defaults to the namespace `apps`, so the commands below
 ## Build and push
 
 Commit first, and tag the image with the commit, so every image maps to code. Never reuse a tag.
-For a new app without a repository, `git init` one; if `git commit` refuses, set `user.name` and
-`user.email`.
+For a new app without a repository, create a directory named after the app in the workspace and
+`git init` it; if `git commit` refuses, set `user.name` and `user.email`.
 
 ```sh
 APP=crm   # lowercase letters, digits and dashes; also the hostname
@@ -62,19 +63,19 @@ internet, but not the LAN or the rest of the cluster.
 
 ## Manifest
 
-Keep it in the app's repository, such as `deploy/k8s.yaml`, with `__IMAGE__` and `__HOST__`
-where the image and hostname go:
+Keep it in the app's repository, such as `deploy/k8s.yaml`, with `__APP__`, `__IMAGE__` and
+`__HOST__` where the app name, image and hostname go:
 
 ```yaml
 apiVersion: apps/v1
 kind: Deployment
-metadata: {name: crm}
+metadata: {name: __APP__}
 spec:
   replicas: 1
   revisionHistoryLimit: 10
-  selector: {matchLabels: {app: crm}}
+  selector: {matchLabels: {app: __APP__}}
   template:
-    metadata: {labels: {app: crm}}
+    metadata: {labels: {app: __APP__}}
     spec:
       securityContext: {runAsNonRoot: true, runAsUser: 1000, seccompProfile: {type: RuntimeDefault}}
       containers:
@@ -89,25 +90,25 @@ spec:
 ---
 apiVersion: v1
 kind: Service
-metadata: {name: crm}
+metadata: {name: __APP__}
 spec:
-  selector: {app: crm}
+  selector: {app: __APP__}
   ports: [{name: http, port: 80, targetPort: http}]
 ---
 apiVersion: networking.k8s.io/v1
 kind: Ingress
-metadata: {name: crm}
+metadata: {name: __APP__}
 spec:
   rules:
   - host: __HOST__
     http:
       paths:
-      - {path: /, pathType: Prefix, backend: {service: {name: crm, port: {name: http}}}}
+      - {path: /, pathType: Prefix, backend: {service: {name: __APP__, port: {name: http}}}}
 ```
 
 - The cluster enforces Pod Security `restricted`: keep the two `securityContext` blocks, and use
   an image that works as UID 1000 (or set `runAsUser` to the image's numeric UID) and listens on
-  a port above 1024. For static files, `FROM busybox`, `COPY www /www`, `USER 1000:1000` and
+  a port above 1024. For static files, `FROM busybox:1.37`, `COPY www /www`, `USER 1000:1000` and
   `CMD ["httpd", "-f", "-p", "8080", "-h", "/www"]` works, with a file `www/healthz` (such as
   `ok`) for the readiness probe.
 - The app must answer `GET /healthz` with a 2xx status, or change `readinessProbe.httpGet.path`
@@ -130,10 +131,12 @@ spec:
 In a new shell, set `APP` and `IMAGE` again as in Build and push.
 
 ```sh
-sed -e "s#__IMAGE__#$IMAGE#" -e "s#__HOST__#$APP.$APPS_DOMAIN#" deploy/k8s.yaml | kubectl apply -f -
+sed -e "s#__APP__#$APP#g" -e "s#__IMAGE__#$IMAGE#" -e "s#__HOST__#$APP.$APPS_DOMAIN#" deploy/k8s.yaml | kubectl apply -f -
 kubectl annotate deploy/$APP kubernetes.io/change-cause="$IMAGE" --overwrite
 kubectl rollout status deploy/$APP --timeout=3m
 curl -fsS "https://$APP.$APPS_DOMAIN/healthz"
+# registry…/$APP@sha256:…, must match the digest buildctl pushed
+kubectl get pod -l app=$APP -o jsonpath='{.items[*].status.containerStatuses[*].imageID}'
 ```
 
 A finished rollout and a healthy `/healthz` do not prove the change works: also open the page or
@@ -146,7 +149,8 @@ the tailnet, where it resolves to Traefik's 100.x address, so it works only for 
 tailnet.
 
 If the rollout does not finish, read `kubectl describe pod -l app=$APP`, `kubectl logs
-deploy/$APP` and `kubectl get events --sort-by=.lastTimestamp`, then roll back.
+deploy/$APP` and `kubectl get events --sort-by=.lastTimestamp`, then roll back. A first deploy
+has no earlier revision: fix forward, or remove the app.
 
 ## Secrets
 
@@ -203,5 +207,5 @@ window the app has no pods and its URL does not answer, so deploy and check it i
 Ask the user first: deleting a PersistentVolumeClaim deletes the app's data.
 
 ```sh
-kubectl delete -f deploy/k8s.yaml
+sed "s#__APP__#$APP#g" deploy/k8s.yaml | kubectl delete -f -
 ```
