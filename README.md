@@ -33,8 +33,8 @@ prompts for each credential, and continue from step 5 with the Cloudflare token 
 `kubectl -n cert-manager get secret cloudflare-api-token`.
 
 **Root.** The commands below run as root on the server. With sudo, prefix them with `sudo`, run
-anything that `cd`s into `/root/amp-k3s-orb-provider` inside `sudo bash -c '…'` (`/root` is mode
-700), and use `sudo k3s kubectl`.
+anything that `cd`s into or globs under `/root` inside `sudo bash -c '…'` (`/root` is mode 700,
+so your own shell can neither enter it nor expand globs there), and use `sudo k3s kubectl`.
 
 ### Ask the user
 
@@ -44,8 +44,9 @@ anything that `cd`s into `/root/amp-k3s-orb-provider` inside `sudo bash -c '…'
    or tag of this repo, if not `main`.
 2. **The orb provider**: its name, such as `homelab`. The user confirms creating it in a dialog
    and adds its orb types in Settings (step 3). To reuse one they have, ask where its token is
-   (such as `/root/orb-provider-token`), and check its orb types now as in step 3, so any fix goes
-   in this message.
+   (such as `/root/orb-provider-token`) and that it is this provider's, not another one's; the
+   test thread in step 6 confirms it. Check its orb types now as in step 3, so any fix goes in
+   this message.
 3. **Orbs only, or with the apps platform.** For the apps platform:
    - A domain for the apps, such as `apps.example.com`, in a zone on Cloudflare.
    - A Cloudflare API token with Zone → DNS → Edit and Zone → Zone → Read on that zone.
@@ -74,8 +75,9 @@ cd /root/amp-k3s-orb-provider && ./node-prep.sh          # on every other machin
 
 ### 2. Install K3s
 
-`--node-ip` is the IPv4 address the other machines reach it at: its LAN address at home, its
-public one on a single cloud server. Without it, K3s exits when the network hands out a new IPv6
+`--node-ip` is the IPv4 address the other machines reach it at: its LAN address at home (on the default
+route, `ip -4 route get 1.1.1.1`, not a virbr0, docker0 or tailscale0 address), its public one on
+a single cloud server. Without it, K3s exits when the network hands out a new IPv6
 prefix. Between machines, allow 6443/tcp, 8472/udp and 10250/tcp.
 
 ```sh
@@ -83,7 +85,7 @@ prefix. Between machines, allow 6443/tcp, 8472/udp and 10250/tcp.
 curl -sfL https://get.k3s.io | sh -s - server --disable traefik --disable servicelb --node-ip <server IPv4>
 # every other machine, with the server's /var/lib/rancher/k3s/server/node-token (copied without printing it)
 curl -sfL https://get.k3s.io | K3S_URL=https://<server IPv4>:6443 K3S_TOKEN=<token> sh -s - --node-ip <its IPv4>
-# server: let orbs run on every machine
+# server, once `kubectl get nodes` lists every machine as Ready: let orbs run on every machine
 kubectl label node --all ate.dev/sandboxClass=gvisor
 ```
 
@@ -115,9 +117,9 @@ type; the user adds the right one and removes the wrong one.
 
 ### 4. Install
 
-With a NAS: install `nfs-common` on every machine, then on the server mount the export, create
-and delete a file as root, and unmount (on a squashed export the file belongs to the anonymous
-user, which is fine). Set its server and path in [`nas-patch.yaml`](nas-patch.yaml) and uncomment
+With a NAS: install `nfs-common` on every machine, then on the server check that root can write
+to the export (on a squashed export the file belongs to the anonymous user, which is fine):
+`d=$(mktemp -d) && mount -t nfs <server>:<path> $d && touch $d/t && ls -ln $d/t && rm $d/t; umount $d; rmdir $d`. Set its server and path in [`nas-patch.yaml`](nas-patch.yaml) and uncomment
 `- path: nas-patch.yaml` in [`kustomization.yaml`](kustomization.yaml).
 
 On the server, install Helm 3 if `helm version --short` is not v3 (Helm 4 cannot run the
@@ -132,11 +134,12 @@ so pass the variables on standard input, never on the command line:
 { printf 'export APPS_DOMAIN=%q\n' '<domain>'
   printf 'export CLOUDFLARE_API_TOKEN=%q\n' "$<its variable>"
   printf 'export TS_OAUTH_CLIENT_ID=%q TS_OAUTH_CLIENT_SECRET=%q\n' "$TS_OAUTH_CLIENT_ID" "$TS_OAUTH_CLIENT_SECRET"
-} | ssh root@<server> 'set -a; . /dev/stdin; /root/amp-k3s-orb-provider/install.sh'   # or: sudo bash -c '…'
+} | ssh root@<server> 'set -a; . /dev/stdin; /root/amp-k3s-orb-provider/install.sh'
+# on the server itself: replace `ssh root@<server>` with `sudo bash -c` and keep the quoted command
 ```
 
-A first install takes 5 to 15 minutes and prints nothing for the 2 to 3 minutes Helm waits for
-pods, so run it in the background and watch `kubectl get pods -A`. It is safe to run again; a
+A first install takes 5 to 15 minutes and prints nothing while Helm waits for pods (2 to 3
+minutes) and while it waits for the wildcard certificate (a few minutes), so run it in the background and watch `kubectl get pods -A`. It is safe to run again; a
 second run upgrades.
 
 ### 5. Apps platform: DNS and access
@@ -149,7 +152,7 @@ Skip this with `--orbs-only`.
    `PATCH /zones/<zone ID>/dns_records/<record ID>` an existing record, else
    `POST /zones/<zone ID>/dns_records`, with
    `{"type": "A", "name": "*.<domain>", "content": "<100.x address>", "proxied": false}`. Send the
-   token on standard input:
+   token on standard input, with `$TOKEN` the variable you passed as `CLOUDFLARE_API_TOKEN`:
    `printf 'Authorization: Bearer %s\n' "$TOKEN" | curl -H @- -H 'Content-Type: application/json' …`.
    Check with `dig +short x.<domain>`.
 2. **Access.** The user's orbs act as the Kubernetes user `amp:<Amp user ID>`. The ID (`user_…`)
@@ -176,12 +179,14 @@ On the server, every pod in `amp-orbs` and `ate-system` is Running (with a NAS,
 the apps platform, also every pod in `cert-manager`, `tailscale`, `traefik`, `registry` and
 `buildkit` is Running, `kubectl -n traefik get certificate wildcard` is Ready, `x.<domain>`
 resolves to Traefik's 100.x address, and `curl https://x.<domain>` from the tailnet gets Traefik's
-404 with a valid certificate.
+404 with a valid certificate. Last, start a thread on the provider with `create_thread`
+(`orb_provider` its name, `orb_size` `small`) that runs `uname -a`; its answer shows that this
+cluster serves the provider.
 
 If something fails, read [Troubleshoot](docs/reference.md#troubleshoot) and the section of
 [docs/reference.md](docs/reference.md) for that part before changing anything.
 
-Tell the user:
+Tell the user all of these:
 
 - **Copy `/root/amp-k3s-orb-provider/snapshots.key` somewhere safe.** It encrypts every paused
   orb; without it they are lost.

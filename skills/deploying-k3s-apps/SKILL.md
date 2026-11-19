@@ -43,10 +43,12 @@ kubectl auth can-i create deployments # yes; "no" means the user has no RoleBind
 
 Each image is tagged with the commit it was built from, so commit first and never reuse a tag. A
 new app gets its own directory in the workspace, such as `<workspace>/<app>`, with `git init`;
-run the commands below from it, and set `user.name` and `user.email` if `git commit` refuses.
+run the commands below from it. If `git commit` refuses, set `user.name` and `user.email` in
+that repository, such as `Amp` and `amp@localhost`.
 
 ```sh
 APP=crm   # lowercase letters, digits and dashes; also the hostname
+kubectl get deploy/$APP 2>/dev/null   # a new app's name must be free: deploying replaces this one
 test -z "$(git status --porcelain)" || { echo 'Commit first'; exit 1; }   # untracked files too
 IMAGE=registry.registry.svc:5000/$APP:$(git rev-parse --short HEAD)
 buildctl --addr tcp://buildkitd.buildkit.svc.cluster.local:1234 \
@@ -136,15 +138,16 @@ sed -e "s#__APP__#$APP#g" -e "s#__IMAGE__#$IMAGE#" -e "s#__HOST__#$APP.$APPS_DOM
 kubectl annotate deploy/$APP kubernetes.io/change-cause="$IMAGE" --overwrite
 kubectl rollout status deploy/$APP --timeout=3m
 curl -fsS "https://$APP.$APPS_DOMAIN/healthz"
-# registry…/$APP@sha256:…, the digest in /tmp/$APP-build.json
-kubectl get pod -l app=$APP -o jsonpath='{.items[*].status.containerStatuses[*].imageID}'
+test "$(kubectl get pod -l app=$APP -o jsonpath='{range .items[*]}{.status.containerStatuses[0].imageID}{"\n"}{end}' | sort -u)" = \
+  "registry.registry.svc:5000/$APP@$(jq -r '."containerimage.digest"' /tmp/$APP-build.json)" && echo 'digest ok'
 ```
 
-Then open the page or call the endpoint the change affects, and for an app with a
+Then fetch the page or endpoint the change affects with `curl -fsS https://$APP.$APPS_DOMAIN/<path>`
+and check its content (for a UI change, also take a screenshot), and for an app with a
 PersistentVolumeClaim check that its data is still there. Tell the user the URL, the image and its
 commit, and what you checked; if the repository has no remote, say that the commit and
-`deploy/k8s.yaml` exist only in this orb. Users open the URL over the tailnet only; from the orb it resolves to
-Traefik inside the cluster.
+`deploy/k8s.yaml` exist only in this orb. Users open the URL over the tailnet only; from the orb
+it resolves to Traefik inside the cluster.
 
 If the rollout stalls, read `kubectl describe pod -l app=$APP`, `kubectl logs deploy/$APP` and
 `kubectl get events --sort-by=.lastTimestamp`, then roll back. A first deploy has nothing to roll
