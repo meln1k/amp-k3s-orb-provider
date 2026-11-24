@@ -24,17 +24,22 @@ The kubeconfig's namespace is `apps`, so the commands in this skill omit `-n`.
 mkdir -p ~/.kube ~/.config/nix
 # No credential in it: kubectl gets a fresh token from `amp orb id-token` per command.
 (umask 077; printf '%s' "$APPS_KUBECONFIG" > ~/.kube/config)
-command -v kubectl >/dev/null || {
-  curl -fsSLo /tmp/kubectl "https://dl.k8s.io/release/$(curl -fsSL https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
-  sudo install /tmp/kubectl /usr/local/bin/kubectl; }
+# kubectl_install <stable or stable-1.N>: over the kubectl on PATH, or into /usr/local/bin.
+kubectl_install() {
+  curl -fsSLo /tmp/kubectl "https://dl.k8s.io/release/$(curl -fsSL https://dl.k8s.io/release/$1.txt)/bin/linux/amd64/kubectl" &&
+    sudo install /tmp/kubectl "$(command -v kubectl || echo /usr/local/bin/kubectl)"; }
+command -v kubectl >/dev/null || kubectl_install stable
 command -v nix >/dev/null || {
   curl -fsSL https://nixos.org/nix/install | sh -s -- --no-daemon
   . ~/.nix-profile/etc/profile.d/nix.sh; }
 # gVisor cannot run Nix's build sandbox.
 printf 'experimental-features = nix-command flakes\nsandbox = false\n' > ~/.config/nix/nix.conf
-# Client within one minor version of the server; if not, install kubectl again as above with
-# stable-1.<server minor>.txt in place of stable.txt.
-kubectl version
+# Kubernetes supports a client within one minor version of the server; the orb's own kubectl
+# may be newer, so install the server's minor if not.
+V=$(kubectl version -o json) && S=$(jq -r .serverVersion.minor <<<"$V" | tr -dc 0-9) &&
+  C=$(jq -r .clientVersion.minor <<<"$V" | tr -dc 0-9) &&
+  { [ $((C - S)) -le 1 ] && [ $((S - C)) -le 1 ] || kubectl_install stable-1.$S; }
+kubectl version   # no skew warning
 kubectl auth whoami                   # amp:<your Amp user ID>
 kubectl auth can-i create deployments # yes; "no" means the user has no RoleBinding in apps
 kubectl -n tasks auth can-i create jobs # yes; needed only for Compute tasks
@@ -54,11 +59,13 @@ kubectl get deploy,svc,ingress $APP --ignore-not-found   # a new app: must print
 nix flake lock && git add flake.lock &&
   { git diff --cached --quiet -- flake.lock || git commit -qm 'Lock flake inputs' -- flake.lock; }
 IMAGE=registry.registry.svc:8080/$APP:$(git rev-parse --short HEAD)
+rm -f /tmp/$APP-digest   # Deploy reads it, so a failed run must not leave an older one
 if [ -n "$(git status --porcelain)" ]; then echo 'Commit first (untracked files too)'; else
   nix build .#image --out-link /tmp/$APP-image &&
   nix run nixpkgs#skopeo -- --insecure-policy copy --dest-tls-verify=false \
     --digestfile /tmp/$APP-digest docker-archive:/tmp/$APP-image "docker://$IMAGE" &&
-  cat /tmp/$APP-digest   # the pushed digest
+  echo "pushed $IMAGE@$(cat /tmp/$APP-digest)" ||
+  echo 'BUILD OR PUSH FAILED: nothing was pushed. Read the error above; a transient Nix error goes away on a rerun.' >&2
 fi
 ```
 
