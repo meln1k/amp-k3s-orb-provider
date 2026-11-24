@@ -6,12 +6,12 @@
 # a new chart renamed or removed it, so a chart upgrade cannot drop a patch silently.
 { lib, pkgs, cfg }:
 let
-  version = "0.20261109.1946"; # the chart the overlay is checked against
+  version = "0.20261118.1813"; # the chart the overlay is checked against
 
   chart = pkgs.runCommand "orb-provider-chart-${version}.tgz" {
     nativeBuildInputs = [ pkgs.kubernetes-helm ];
     outputHashMode = "flat";
-    outputHash = "sha256-cd+yekojMrnnG16Y/fkc2GCdBRzcl0w8pNZA951ktnU=";
+    outputHash = "sha256-cEpxtyUVoj7s0b5lzRupo8fkTPfs7JeB98737vbjMcA=";
     SSL_CERT_FILE = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
   } ''
     export HOME=$TMPDIR
@@ -161,10 +161,6 @@ let
         requests = { cpu = "250m"; memory = "512Mi"; };
         limits = { cpu = "2"; memory = "1Gi"; };
       }))
-      # Since chart 0.20261109 the podcert-agent image runs as uid 65532, so it writes the TLS key
-      # 0640 owned by 65532, and Postgres refuses to start ("private key file ... must be owned by
-      # the database user or root"). Run it as root, as the earlier image did.
-      (initContainer "podcert-agent" (c: c // { securityContext = (c.securityContext or { }) // { runAsUser = 0; }; }))
     ])
 
     # atelet: K3s nodes have no EKS image credential provider, so drop its args and host mounts
