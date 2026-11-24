@@ -16,8 +16,7 @@ container mounts the result from the server's Nix store. The root-only
 `amp-orbs-secrets.service` creates the Secrets from files, so none enters the Nix store. It changes:
 
 - Postgres: a 5 GiB volume instead of 500 GiB; requests 250m CPU and 512 MiB instead of 2 CPU
-  and 1 GiB; limits 2 CPU and 1 GiB instead of 16 CPU and 2 GiB. Its `podcert-agent` init
-  container runs as root, because Postgres refuses a TLS key owned by another user.
+  and 1 GiB; limits 2 CPU and 1 GiB instead of 16 CPU and 2 GiB.
 - `ate-api-server` and `ate-idp-server`: 2 replicas become 1.
 - Snapshots: go to an in-cluster [Versity S3 Gateway](https://github.com/versity/versitygw)
   instead of AWS. It stores each object as a file encrypted with gocryptfs, on an NFS export on
@@ -261,7 +260,7 @@ as the snapshot is on the node's disk, while the upload to the gateway continues
 background, so a pause takes a few seconds instead of waiting for the upload.
 
 The provider has no setting for either, so the build replaces two exact strings in its `main.js`,
-plus two for the worker's memory and CPU and one for earlyoom. The build fails unless each string
+plus three for the worker's memory (limit and request) and CPU and one for earlyoom. The build fails unless each string
 occurs exactly once (`the provider has 0 occurrences of …`), so a chart that moves them cannot
 silently run without them. To run without the patches, remove the `provider-main` volume and mount
 from the `amp-orb-provider` patch in `orbs.nix` and deploy: new orbs take file-only snapshots and
@@ -453,7 +452,7 @@ failed. The bootstrap Job's log is `kubectl -n amp-orbs logs job/substrate-boots
 
 ## Upgrade
 
-This overlay is checked against chart 0.20261109.1946, which `orbs.nix` pins by version and hash.
+This overlay is checked against chart 0.20261118.1813, which `orbs.nix` pins by version and hash.
 To upgrade, update the flake input (`nix flake update amp-k3s`) and deploy. To try a new chart,
 run `./update-chart.sh` (or `./update-chart.sh <version>`): it moves `orbs.nix` to the newest
 chart, refills the chart's and the provider `main.js`'s hashes, and renders the manifest, which

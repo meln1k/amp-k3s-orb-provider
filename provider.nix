@@ -1,5 +1,5 @@
 # Amp's orb provider, patched at build time. The provider has no settings for these, so the build
-# replaces five exact strings in its bundled main.js and fails unless each occurs exactly once.
+# replaces six exact strings in its bundled main.js and fails unless each occurs exactly once.
 # orbs.nix mounts the result over the original in the provider container. What each patch is for:
 # docs/reference.md, "Memory snapshots", "Sizing" and "Running out of memory".
 { lib, pkgs, image, fail }:
@@ -11,7 +11,7 @@ let
   original = pkgs.runCommand "amp-orb-provider-main-${builtins.substring 0 16 (builtins.hashString "sha256" image)}.js" {
     nativeBuildInputs = [ pkgs.crane pkgs.gnutar ];
     outputHashMode = "flat";
-    outputHash = "sha256-73EkCou9thhqZs3fexPP9kvohgIZ/ViU9KcB8ljQaZw=";
+    outputHash = "sha256-EUIXNfbT0lDzKeRPQcVxsTxEcA+TcY6EPNSC21UkfdU=";
     SSL_CERT_FILE = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
   } ''
     export HOME=$TMPDIR
@@ -40,8 +40,10 @@ let
     [ ''preferredFidelity:"SNAPSHOT_FIDELITY_ROOTFS"'' ''preferredFidelity:"SNAPSHOT_FIDELITY_MEMORY"'' ]
     # A pause returns once the snapshot is on the node; the upload continues in the background.
     [ ''{durable:"DURABILITY_MODE_SYNCHRONOUS",'' ''{durable:"DURABILITY_MODE_ASYNCHRONOUS",'' ]
-    # Worker pods get the orb's memory plus 128 MiB instead of plus 1 GiB.
+    # Worker pods get the orb's memory plus 128 MiB instead of plus 1 GiB, as their limit and as
+    # their request (memoryRequestGi, which is memoryGi unless an orb type sets it lower).
     [ "`\${i.memoryGi+1}Gi`" "`\${i.memoryGi*1024+128}Mi`" ]
+    [ "`\${i.memoryRequestGi+1}Gi`" "`\${i.memoryRequestGi*1024+128}Mi`" ]
     # Worker pods request the orb's whole CPU, its limit, instead of 1 CPU: compilers and browsers
     # keep orbs busy, and a node that admits more orb CPU than it has slows every orb down.
     [ ''requests:{cpu:"1",memory:e}'' ''requests:{cpu:String(i.cpu),memory:e}'' ]
