@@ -176,7 +176,7 @@ let
           # The plugin gives up on a snapshot download after the AWS SDK's default 3 attempts
           # (about 6 s), and a failed restore marks the orb crashed, which the provider then
           # deletes with its snapshots. 20 attempts, backing off up to 20 s each, outlast a
-          # gateway or NAS restart.
+          # gateway restart.
           (addEnv [{ name = "AWS_MAX_ATTEMPTS"; value = "20"; }])
           toGateway
         ]))
@@ -223,4 +223,4 @@ let
       }) r
     else r;
 in
-namespaces ++ map onServer (lib.pipe (map unhook chartResources ++ import ./versitygw.nix { inherit (cfg) nas; inherit s3; }) patches)
+namespaces ++ map onServer (lib.pipe (map unhook chartResources ++ import ./versitygw.nix { inherit s3; }) patches)

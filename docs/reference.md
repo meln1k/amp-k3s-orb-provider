@@ -19,9 +19,8 @@ container mounts the result from the server's Nix store. The root-only
   and 1 GiB; limits 2 CPU and 1 GiB instead of 16 CPU and 2 GiB.
 - `ate-api-server` and `ate-idp-server`: 2 replicas become 1.
 - Snapshots: go to an in-cluster [Versity S3 Gateway](https://github.com/versity/versitygw)
-  instead of AWS. It stores each object as a file encrypted with gocryptfs, on an NFS export on
-  your NAS (see [Snapshot store](#snapshot-store) and
-  [Snapshot encryption](#snapshot-encryption)).
+  instead of AWS. It stores each object as a plain file on the server's disk (see
+  [Snapshot store](#snapshot-store)).
 - atelet: the EKS image credential provider is removed, so the public images are pulled
   anonymously. Snapshot uploads run one at a time with more time each, and the local copy is
   kept for a day (see [Snapshot timing](#snapshot-timing)).
@@ -45,8 +44,8 @@ of disk plus the snapshot store instead of 500 GiB.
 
 ## Performance
 
-Measured on one Intel N150 mini PC with 16 GB RAM, with snapshots on a UniFi UNAS 2 over gigabit
-NFSv3. Two `small` orbs each held 1 GiB of memory and a 200 MB file and were paused and resumed
+Measured on one Intel N150 mini PC with 16 GB RAM, with an earlier version that stored snapshots
+on a UniFi UNAS 2 over gigabit NFSv3 instead of the server's disk. Two `small` orbs each held 1 GiB of memory and a 200 MB file and were paused and resumed
 together:
 
 | | |
@@ -119,7 +118,7 @@ Each machine has a `role` in the module:
 - **server:** the control plane and the shared services, which are required to run here
   (`node-role.kubernetes.io/control-plane`): Postgres keeps its local volume on the node it first
   ran on, and the other machines may be off. It runs orbs too. In a wake of three orbs from the
-  NAS the snapshot gateway used about 1 core; on a busy server, raise its CPU request in
+  store the snapshot gateway used about 1 core; on a busy server, raise its CPU request in
   `orbs.nix` from 250m.
 - **apps:** the apps platform and the apps; apps also run on the server. It has no
   `ate.dev/sandboxClass` label, so atelet does not run there, and a `NoSchedule` taint that orb workers do not tolerate, so no orb runs
@@ -131,7 +130,7 @@ Each machine has a `role` in the module:
 - **burst:** orbs, when the others are full: a `PreferNoSchedule` taint makes the scheduler pick
   it last, though not strictly. Its shutdown waits up to 15 minutes: the kubelet's graceful
   shutdown stops the orb workers first, which suspend their orbs, then gives atelet, a critical
-  pod, its 330 s to upload the snapshots to the NAS. Not tested yet: whether atelet finishes
+  pod, its 330 s to upload the snapshots to the server. Not tested yet: whether atelet finishes
   every upload in that time. A snapshot it did not upload stays only on the burst machine, and
   waking that orb elsewhere fails, which deletes it (see [Snapshot store](#snapshot-store)); boot
   the machine again before waking such an orb. It also runs tasks, short compute-heavy Jobs such
@@ -176,16 +175,14 @@ one it stops. Orbs created before the patch keep their old setup until they are 
 
 ### Snapshot store
 
-Paused orbs live in the `versitygw` pod on the server, one encrypted file per object, under
-`encrypted/` on the NFS export `services.amp-orbs.nas` names. The gateway needs write access to
-the export. Object metadata goes in files under
-`meta/` next to `data/` inside the encrypted store, so NFSv3, which has no extended attributes,
-works too; Versity calls this mode experimental. It passed the S3 calls Substrate makes on an NFSv3
-export with `all_squash`, as the UNAS sets up its shared drives.
-
-For a UniFi UNAS: enable NFS in UniFi Drive > Settings > Services, create a shared drive, and
-leave it in the default Collaborative (all squash) mode. Its export path is
-`/var/nfs/shared/<Shared_Drive_Name>`.
+Paused orbs live in the `versitygw` pod on the server, one plain file per object under
+`/var/lib/amp-orbs/snapshots` (metadata in extended attributes), next to the 24-hour local
+copies under `/var/lib/ate`. Nothing else holds them: if the server's disk is lost, so is every
+paused orb, so back that directory up (restic or rsync to a NAS works, while nothing pauses) if
+that matters. Use disk encryption such as LUKS: a snapshot holds the orb's memory, tokens
+included. Turn on **Idle Orb Cleanup** for the provider in Amp, or the store only grows: about
+half of orbs are done within an hour, so the store holds roughly the orbs created over the
+cleanup period, each 0.1 to 1.5 GB.
 
 **Outages of the store can delete orbs.** When a wake has no local copy (see
 [Snapshot timing](#snapshot-timing)), atelet downloads the snapshot from the gateway. If that
@@ -193,39 +190,12 @@ download fails, Substrate marks the orb crashed, and the provider deletes it tog
 snapshot it has in the store; Amp then gives the thread a new, empty orb. With the plugin's default
 of 3 attempts, a 60 s gateway outage during two such wakes deleted both orbs. The overlay therefore
 gives atelet's objectstore plugin 20 attempts (`AWS_MAX_ATTEMPTS`), and the same outage then only
-delayed the wake by about 95 s. The NFS mount is `hard`, so while the NAS restarts, the gateway's
-reads wait rather than fail; its liveness check only restarts it after 5 minutes of failures, so
-that a NAS restart does not drop the downloads in flight. An outage that outlasts the retries can
-still delete orbs that wake during it, so schedule NAS updates and restarts for when nobody uses
-Amp. Wakes from a local copy do not read the store. A pause during an outage takes about 1.5
-minutes longer and leaves the snapshot it replaces in the store until the orb is deleted.
+delayed the wake by about 95 s. Wakes from a local copy do not read the store. A pause during an
+outage takes about 1.5 minutes longer and leaves the snapshot it replaces in the store until the
+orb is deleted.
 
-### Snapshot encryption
-
-A paused orb's snapshot holds its memory, which can include tokens and other secrets. The gateway
-writes every object through [gocryptfs](https://nuetzlich.net/gocryptfs/), so its volume, and the
-NFS traffic to a NAS, only carry file contents and names encrypted with AES-256-GCM. Substrate and
-the S3 API see plain objects.
-
-- **Key:** `/var/lib/amp-orbs/snapshots.key` on the server becomes the Secret `orb-snapshots-key`, which only the gateway mounts.
-  gocryptfs keeps its master key in `encrypted/gocryptfs.conf`, encrypted with it. Without the key
-  the store can't be read; keep a copy outside the cluster. A wrong key stops the gateway, and its
-  log says `Password incorrect`.
-- **Costs:** mounting gocryptfs (FUSE) makes the gateway's container privileged and root. Its init
-  container downloads gocryptfs v2.7.0 from GitHub at every start and checks its SHA-256. On the
-  [Performance](#performance) machine, an orb holding 1 GiB still uploaded in 65 s and woke from
-  the NAS in 15.6 s, as fast as without encryption, and the store grew by 0.8%. While moving a
-  snapshot the gateway used about 0.7 CPU and filled its memory limit, mostly with page cache the
-  kernel frees; at 512 MiB it ran at the limit without being killed, so the limit is 1 GiB.
-- **Not covered:** the local copy of each snapshot on its node, under `/var/lib/ate`; use disk
-  encryption such as LUKS for that. Uploads from atelet to the gateway are plain HTTP inside the
-  cluster: between machines they cross your LAN unencrypted, unless K3s runs with
-  `--flannel-backend=wireguard-native`. K3s stores the key's Secret unencrypted in its datastore
-  on the server unless it runs with `--secrets-encryption`.
-
-An install from before encryption keeps its old store, unencrypted, in `data/` and `meta/` next to
-`encrypted/`. The gateway no longer reads them, so paused orbs whose snapshot is only there lose
-their state. Delete those two directories by hand.
+Uploads from atelet to the gateway are plain HTTP inside the cluster: from a burst machine they
+cross your LAN unencrypted, unless K3s runs with `--flannel-backend=wireguard-native`.
 
 ### Snapshot timing
 
@@ -235,7 +205,7 @@ The overlay changes these atelet defaults for a homelab store:
 - **Upload time limit:** atelet cancels and retries an upload after `--snapshot-upload-timeout`
   plus the data it holds in the upload buffer at `--snapshot-upload-est-throughput-mib`, and
   doubles the limit after each failure. The defaults (2m, 100 MiB/s) cut off two 2 GB snapshots
-  uploading together to a NAS; the overlay sets 3m and 5 MiB/s, so a 416 MiB memory image gets
+  uploading together to a slow store; the overlay sets 3m and 5 MiB/s, so a 416 MiB memory image gets
   about 4.4 minutes.
 - **One upload at a time:** `--snapshot-upload-workers=1`. Uploads share the objectstore
   plugin's 512 MiB buffer, and an upload waiting there for room counts that wait against its
@@ -484,6 +454,5 @@ kubectl delete validatingadmissionpolicy,validatingadmissionpolicybinding sandbo
 kubectl delete role,rolebinding atenet-dns -n kube-system --ignore-not-found
 ```
 
-Deleting `ate-system` also deletes the gateway. The files on the NAS stay, readable only with
-`snapshots.key`. Removing K3s entirely also leaves `/var/lib/rancher`,
+Deleting `ate-system` also deletes the gateway. Removing K3s entirely leaves `/var/lib/rancher`,
 `/var/lib/ate` and `/var/lib/amp-orbs`.

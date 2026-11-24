@@ -4,7 +4,7 @@ Run [Amp orbs](https://ampcode.com/docs/orbs/self-hosted) on your own NixOS mach
 cluster of one server, one apps machine and any number of burst machines, such as a homelab.
 The apps platform runs only on the apps machine, so a cluster without one never serves apps. Threads on this provider run in gVisor sandboxes
 on your hardware. A paused orb keeps its memory, so its processes are still running when you
-come back; its snapshot is stored, encrypted, on your NAS. The cluster only
+come back; its snapshot is stored on the server's disk. The cluster only
 connects out to ampcode.com and needs no inbound ports.
 
 It is a NixOS module. It runs K3s, renders Amp's official
@@ -61,9 +61,6 @@ use `sudo k3s kubectl`.
    - A Tailscale [OAuth client](https://login.tailscale.com/admin/settings/oauth) with the
      Devices Core and Auth Keys write scopes and the tag `tag:k8s-operator`, stored as
      `TS_OAUTH_CLIENT_ID` and `TS_OAUTH_CLIENT_SECRET`.
-5. **A NAS** for paused orbs: an NFS export (server and path) writable by root or squashed to a
-   user who can write. Use a new, empty directory: the server generates a new encryption key,
-   and the snapshot gateway does not start on a directory another key encrypted.
 
 ### 1. The machines
 
@@ -121,10 +118,6 @@ starts. Amp cannot rename a type; the user adds the right one and removes the wr
 
 ### 4. Install
 
-Check on the server that root can write to the export (on a squashed export the file
-belongs to the anonymous user, which is fine):
-`nix shell nixpkgs#nfs-utils -c sh -c 'd=$(mktemp -d) && mount -t nfs <server>:<path> $d && touch $d/t && ls -ln $d/t && rm $d/t; umount $d; rmdir $d'`.
-
 Add this repo to the user's flake and the module to each machine, then deploy the server first,
 then the apps machine, then the burst machines, the way the user deploys (`nixos-rebuild switch`, or commit and push for an auto-upgrade):
 
@@ -141,7 +134,6 @@ amp-k3s.nixosModules.default
 
     # the server:
     appsDomain = "<domain>";
-    nas = { server = "<NAS IP>"; path = "/export/path"; };  # UniFi UNAS: /var/nfs/shared/<Shared_Drive_Name>
 
     # every other machine:
     # serverAddr = "https://<server IPv4>:6443";
@@ -207,8 +199,9 @@ If something fails, read [Troubleshoot](docs/reference.md#troubleshoot) and the 
 
 Tell the user all of these:
 
-- **Copy `/var/lib/amp-orbs/snapshots.key` on the server somewhere safe.** It encrypts every
-  paused orb; without it they are lost.
+- Paused orbs live only on the server's disk, under `/var/lib/amp-orbs/snapshots`: turn on
+  **Idle Orb Cleanup** for the provider (14 days suits a 1 TB disk), and back that directory up
+  if losing every paused orb with the disk is not acceptable.
 - Pick the provider under **Orb → Self-Hosted** in the thread composer, or make it the default
   under **Default Orb** in Settings → Orbs. To test it, start a thread on it, run a background
   process, wait until the orb pauses, then send another message: the process is still running.

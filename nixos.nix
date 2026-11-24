@@ -47,10 +47,9 @@ let
     for f in orb-provider-token cloudflare-api-token ts-oauth-client-id ts-oauth-client-secret; do
       [ -s "$f" ] || { echo "missing ${stateDir}/$f (README, step 2)" >&2; exit 1; }
     done
-    # Generated once; keep a copy of snapshots.key off the machine, or paused orbs are lost with it.
+    # Generated once: the snapshot gateway's credentials.
     [ -e s3.env ] || printf 'AWS_ACCESS_KEY_ID=%s\nAWS_SECRET_ACCESS_KEY=%s\n' \
       "$(openssl rand -hex 10)" "$(openssl rand -hex 24)" > s3.env
-    [ -e snapshots.key ] || openssl rand -base64 32 > snapshots.key
 
     until kubectl get --raw /readyz >/dev/null 2>&1; do sleep 5; done
     # secret <namespace> <name> <kubectl create secret generic arguments>...
@@ -61,7 +60,6 @@ let
       kubectl -n "$ns" create secret generic "$name" "$@" --dry-run=client -o yaml | kubectl apply -f -
     }
     secret ate-system orb-snapshots-s3 --from-env-file=s3.env
-    secret ate-system orb-snapshots-key --from-file=snapshots.key
     secret amp-orbs amp-orb-spawner --from-file=AMP_ORB_PROVIDER_TOKEN=orb-provider-token
     secret tailscale operator-oauth --from-file=client_id=ts-oauth-client-id \
       --from-file=client_secret=ts-oauth-client-secret
@@ -109,18 +107,6 @@ in
       type = lib.types.strMatching "([a-z0-9]([a-z0-9-]*[a-z0-9])?\\.)+[a-z]{2,}";
       example = "apps.example.com";
       description = "Server only: the apps' domain, in a zone on Cloudflare.";
-    };
-    nas = lib.mkOption {
-      type = lib.types.submodule {
-        options = {
-          server = lib.mkOption { type = lib.types.str; example = "192.168.1.5"; };
-          path = lib.mkOption { type = lib.types.str; example = "/var/nfs/shared/orbs"; };
-        };
-      };
-      description = ''
-        Server only: the NFS export paused orbs are stored on, writable by root (or squashed to a
-        user who can write).
-      '';
     };
   };
 
@@ -188,7 +174,7 @@ in
 
     # A burst machine's shutdown waits for its orbs: the kubelet stops the orb workers first, which
     # suspend their orbs, then atelet (a critical pod, 330 s grace), which uploads the snapshots to
-    # the NAS. logind has to allow the kubelet to delay the shutdown that long.
+    # the server. logind has to allow the kubelet to delay the shutdown that long.
     (lib.mkIf (cfg.role == "burst") {
       services.k3s.gracefulNodeShutdown = {
         enable = true;
@@ -231,8 +217,6 @@ in
           ${config.systemd.package}/bin/systemd-tmpfiles --create --prefix=${manifestDir} || [ $? = 65 ]
         '')
       ];
-      # The kubelet mounts the NAS for the snapshot gateway, which runs on the server.
-      boot.supportedFilesystems = [ "nfs" ];
       networking.firewall.allowedTCPPorts = [ 6443 ];
 
       systemd.tmpfiles.rules = [ "d ${stateDir} 0700 root root -" ];
