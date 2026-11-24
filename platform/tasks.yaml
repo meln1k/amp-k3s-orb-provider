@@ -1,0 +1,97 @@
+# The namespace for short, compute-heavy tasks, such as test or simulation sweeps, which run on the
+# burst machines only, and the Role agents run them with. Amp users' orbs get it through a
+# RoleBinding per user, like apps (docs/reference.md, Apps platform). Tasks are Jobs and Pods
+# only: no Services, Ingresses or volumes, so nothing here serves or keeps anything.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: tasks
+  annotations:
+    # On the burst machines only (nixos.nix): PodNodeSelector adds the selector to every pod
+    # here and refuses a pod whose own selector conflicts. While every burst machine is off,
+    # tasks wait Pending. Their PreferNoSchedule taint needs no toleration.
+    scheduler.alpha.kubernetes.io/node-selector: amp-orbs/role=burst
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+---
+# Containers that set nothing get 1 CPU and 1 GiB, a memory limit equal to their request and no
+# CPU limit, so a task uses whatever CPU its machine has free; orbs keep theirs, since they
+# request all of it.
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: defaults
+  namespace: tasks
+spec:
+  limits:
+  - type: Container
+    defaultRequest: {cpu: "1", memory: 1Gi}
+    default: {memory: 1Gi}
+---
+# What all tasks together may reserve, so orbs that overflow from the server still find room on
+# the burst machines; size it to what they hold.
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: tasks
+  namespace: tasks
+spec:
+  hard:
+    requests.cpu: "64"
+    requests.memory: 96Gi
+    limits.memory: 96Gi
+    pods: "200"
+---
+# Tasks accept connections only from each other, and reach each other, Traefik (so apps by their
+# public names), the cluster's DNS and the internet, but not the LAN, the NAS, the nodes, the
+# tailnet or anything else in the cluster.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: isolated
+  namespace: tasks
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+  ingress:
+  - from:
+    - podSelector: {}
+  egress:
+  - to:
+    - podSelector: {}
+    - namespaceSelector:
+        matchLabels: {kubernetes.io/metadata.name: traefik}
+  - to:
+    - namespaceSelector:
+        matchLabels: {kubernetes.io/metadata.name: kube-system}
+      podSelector:
+        matchLabels: {k8s-app: kube-dns}
+    ports:
+    - {port: 53, protocol: UDP}
+    - {port: 53, protocol: TCP}
+  - to:
+    - ipBlock:
+        cidr: 0.0.0.0/0
+        except: [10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10, 169.254.0.0/16]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: agent
+  namespace: tasks
+rules:
+- apiGroups: [""]
+  resources: [pods, configmaps, secrets]
+  verbs: [get, list, watch, create, update, patch, delete, deletecollection]
+- apiGroups: [""]
+  resources: [pods/log, events, resourcequotas, limitranges]
+  verbs: [get, list, watch]
+- apiGroups: [""]
+  resources: [pods/exec, pods/attach]
+  verbs: [get, create]
+- apiGroups: [batch]
+  resources: [jobs]
+  verbs: [get, list, watch, create, update, patch, delete, deletecollection]
+- apiGroups: [metrics.k8s.io]
+  resources: [pods]
+  verbs: [get, list]

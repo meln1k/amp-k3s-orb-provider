@@ -6,6 +6,11 @@ apiVersion: v1
 kind: Namespace
 metadata:
   name: apps
+  annotations:
+    # On the apps machine or the server (nixos.nix): PodNodeSelector adds the selector, and
+    # PodTolerationRestriction the toleration for the apps machine's taint, to every pod here.
+    scheduler.alpha.kubernetes.io/node-selector: amp-orbs/runs-apps=true
+    scheduler.alpha.kubernetes.io/defaultTolerations: '[{"key": "amp-orbs/apps", "operator": "Exists", "effect": "NoSchedule"}]'
   labels:
     # Non-root, no privilege escalation, no added capabilities, no host namespaces or paths.
     pod-security.kubernetes.io/enforce: restricted

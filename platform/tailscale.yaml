@@ -1,10 +1,15 @@
 # The Tailscale Kubernetes operator. It runs one proxy per exposed Service, and only Traefik is
 # exposed (traefik.yaml), so the cluster is one tailnet device however many apps it hosts.
-# install.sh asks for the `operator-oauth` Secret (README).
+# amp-orbs-secrets.service creates the `operator-oauth` Secret from files (README).
 apiVersion: v1
 kind: Namespace
 metadata:
   name: tailscale
+  annotations:
+    # On the apps machine only (nixos.nix): PodNodeSelector adds the selector, and
+    # PodTolerationRestriction the toleration for its taint, to every pod here.
+    scheduler.alpha.kubernetes.io/node-selector: amp-orbs/role=apps
+    scheduler.alpha.kubernetes.io/defaultTolerations: '[{"key": "amp-orbs/apps", "operator": "Exists", "effect": "NoSchedule"}]'
 ---
 apiVersion: helm.cattle.io/v1
 kind: HelmChart

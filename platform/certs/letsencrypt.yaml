@@ -1,8 +1,8 @@
 # The apps' wildcard certificate from Let's Encrypt, proven over DNS-01: cert-manager writes a TXT
 # record through your DNS provider's API, so nothing has to be reachable from the internet. This
 # uses Cloudflare; for another provider, replace the solver
-# (https://cert-manager.io/docs/configuration/acme/dns01/). install.sh replaces apps.example.com
-# with APPS_DOMAIN.
+# (https://cert-manager.io/docs/configuration/acme/dns01/). nixos.nix replaces apps.example.com
+# with the apps' domain.
 apiVersion: cert-manager.io/v1
 kind: ClusterIssuer
 metadata:
@@ -17,7 +17,7 @@ spec:
         dnsZones: [apps.example.com]
       dns01:
         cloudflare:
-          # install.sh asks for it and creates it in the cert-manager namespace.
+          # amp-orbs-secrets.service creates it in the cert-manager namespace.
           apiTokenSecretRef: {name: cloudflare-api-token, key: api-token}
 ---
 # One level of subdomains: crm.apps.example.com, not a.crm.apps.example.com.

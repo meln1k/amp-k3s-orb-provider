@@ -1,15 +1,16 @@
 ---
 name: deploying-k3s-apps
-description: Builds, deploys, rolls back and removes long-running apps on the self-hosted K3s cluster, served at https://<app>.$APPS_DOMAIN. Use when asked to deploy, update, roll back, debug or remove an app there, or to give an app a hostname.
+description: Builds, deploys, rolls back and removes long-running apps on the self-hosted K3s cluster, served at https://<app>.$APPS_DOMAIN. Use when asked to deploy, update, roll back, debug or remove an app there, or to give an app a hostname, and runs compute-heavy tasks such as test sweeps on its burst machines.
 ---
 
 # Deploying apps to the K3s cluster
 
-An app is a Deployment, a Service and an Ingress in the namespace `apps`. BuildKit in the cluster
-builds its image and pushes it to the cluster's registry, and Traefik serves it at
-`https://<app>.$APPS_DOMAIN` with a wildcard certificate. You have rights in `apps` only. The
-cluster refuses root containers, LoadBalancer and NodePort Services, `externalIPs` and Tailscale
-annotations, and Docker in the orb cannot build or push its images.
+An app is a Deployment, a Service and an Ingress in the namespace `apps`. You build its image
+with Nix in the orb, from the app's `flake.nix`, and push it to the cluster's registry, and
+Traefik serves it at `https://<app>.$APPS_DOMAIN` with a wildcard certificate. You have rights in
+`apps`, and in `tasks` for compute jobs (see Compute tasks), nowhere else. The cluster refuses root containers, LoadBalancer and NodePort Services,
+`externalIPs` and Tailscale annotations. Docker in the orb cannot build, and there is no other
+builder, so an app with only a Dockerfile needs a `flake.nix` first.
 
 Deploy only when the user asks for a deploy; a request to commit or push code is not one.
 
@@ -20,24 +21,23 @@ The kubeconfig's namespace is `apps`, so the commands in this skill omit `-n`.
 ```sh
 : "${APPS_KUBECONFIG:?Set APPS_KUBECONFIG in Amp environment variables (platform/agent-kubeconfig.sh)}"
 : "${APPS_DOMAIN:?Set APPS_DOMAIN in Amp environment variables, such as apps.example.com}"
-mkdir -p ~/.kube ~/.buildkit
+mkdir -p ~/.kube ~/.config/nix
 # No credential in it: kubectl gets a fresh token from `amp orb id-token` per command.
 (umask 077; printf '%s' "$APPS_KUBECONFIG" > ~/.kube/config)
 command -v kubectl >/dev/null || {
   curl -fsSLo /tmp/kubectl "https://dl.k8s.io/release/$(curl -fsSL https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
   sudo install /tmp/kubectl /usr/local/bin/kubectl; }
-command -v buildctl >/dev/null ||
-  curl -fsSL https://github.com/moby/buildkit/releases/download/v0.35.0/buildkit-v0.35.0.linux-amd64.tar.gz |
-  sudo tar xz -C /usr/local bin/buildctl
+command -v nix >/dev/null || {
+  curl -fsSL https://nixos.org/nix/install | sh -s -- --no-daemon
+  . ~/.nix-profile/etc/profile.d/nix.sh; }
+# gVisor cannot run Nix's build sandbox.
+printf 'experimental-features = nix-command flakes\nsandbox = false\n' > ~/.config/nix/nix.conf
 # Client within one minor version of the server; if not, install kubectl again as above with
 # stable-1.<server minor>.txt in place of stable.txt.
 kubectl version
-# BuildKit accepts only clients with this certificate.
-(umask 077; for f in ca.crt tls.crt tls.key; do
-  kubectl get secret buildkit-client -o go-template="{{index .data \"$f\" | base64decode}}" > ~/.buildkit/$f
-done)
 kubectl auth whoami                   # amp:<your Amp user ID>
 kubectl auth can-i create deployments # yes; "no" means the user has no RoleBinding in apps
+kubectl -n tasks auth can-i create jobs # yes; needed only for Compute tasks
 ```
 
 ## Build and push
@@ -50,20 +50,48 @@ that repository, such as `Amp` and `amp@localhost`.
 ```sh
 APP=crm   # lowercase letters, digits and dashes; also the hostname
 kubectl get deploy,svc,ingress $APP --ignore-not-found   # a new app: must print nothing
-IMAGE=registry.registry.svc:5000/$APP:$(git rev-parse --short HEAD)
+# creates or updates flake.lock, and commits it if it changed, before the tag is taken
+nix flake lock && git add flake.lock &&
+  { git diff --cached --quiet -- flake.lock || git commit -qm 'Lock flake inputs' -- flake.lock; }
+IMAGE=registry.registry.svc:8080/$APP:$(git rev-parse --short HEAD)
 if [ -n "$(git status --porcelain)" ]; then echo 'Commit first (untracked files too)'; else
-  buildctl --addr tcp://buildkitd.buildkit.svc.cluster.local:1234 \
-    --tlscacert ~/.buildkit/ca.crt --tlscert ~/.buildkit/tls.crt --tlskey ~/.buildkit/tls.key \
-    build --frontend dockerfile.v0 --local context=. --local dockerfile=. \
-    --output "type=image,name=$IMAGE,push=true" --metadata-file /tmp/$APP-build.json
-  jq -r '."containerimage.digest"' /tmp/$APP-build.json   # the pushed digest
+  nix build .#image --out-link /tmp/$APP-image &&
+  nix run nixpkgs#skopeo -- --insecure-policy copy --dest-tls-verify=false \
+    --digestfile /tmp/$APP-digest docker-archive:/tmp/$APP-image "docker://$IMAGE" &&
+  cat /tmp/$APP-digest   # the pushed digest
 fi
 ```
 
+The flake sees only files Git tracks, so commit everything the image needs. A
+static site keeps its pages in `www/`, with a file `www/healthz` containing `ok`, and this
+`flake.nix`:
+
+```nix
+{
+  inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+  outputs = { nixpkgs, ... }:
+    let pkgs = nixpkgs.legacyPackages.x86_64-linux; in {
+      packages.x86_64-linux.image = pkgs.dockerTools.buildLayeredImage {
+        name = "app";
+        config = {
+          User = "1000:1000";
+          Cmd = [ "${pkgs.busybox}/bin/httpd" "-f" "-p" "8080" "-h" "${./www}" ];
+        };
+      };
+    };
+}
+```
+
+For another app, build it as a package in the same flake and name it in `Cmd`. The image holds
+only what `Cmd` and `contents` refer to: no shell, no `/tmp` and no CA certificates. Add
+`extraCommands = "mkdir -m 1777 tmp";` if the app writes temporary files, and for HTTPS calls
+`contents = [ pkgs.cacert ];` with `Env = [ "SSL_CERT_FILE=${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt" ];`
+in `config`.
+
 Deploying an existing name replaces that app.
 
-Build steps reach the internet, where base images come from, but not the LAN or the cluster. Only
-BuildKit and the nodes reach the registry, not the orb.
+The build runs in the orb, on its CPUs, and fetches what it can from cache.nixos.org. The
+registry is reachable from the orb and the nodes only, not from apps.
 
 ## Manifest
 
@@ -111,15 +139,7 @@ spec:
 ```
 
 - Pod Security is `restricted`: keep both `securityContext` blocks, and use an image that works as
-  UID 1000 (or set `runAsUser` to its numeric UID) and listens above port 1024. A static site
-  keeps its pages in `www/`, with a file `www/healthz` containing `ok`, and this Dockerfile:
-
-  ```dockerfile
-  FROM busybox:1.37
-  COPY www /www
-  USER 1000:1000
-  CMD ["httpd", "-f", "-p", "8080", "-h", "/www"]
-  ```
+  UID 1000 (or set `runAsUser` to its numeric UID) and listens above port 1024.
 
 - The pod gets traffic, and the rollout finishes, only once `GET /healthz` returns 2xx; point the
   `readinessProbe` at another path if the app serves that instead.
@@ -135,15 +155,18 @@ spec:
 
 ## Deploy
 
-In a new shell, set `APP` and `IMAGE` again as in Build and push.
+In a new shell, set `APP` and `IMAGE` again as in Build and push. The registry has no login, so
+any orb could replace a tag: deploy the digest you pushed, never the tag.
 
 ```sh
-sed -e "s#__APP__#$APP#g" -e "s#__IMAGE__#$IMAGE#" -e "s#__HOST__#$APP.$APPS_DOMAIN#" deploy/k8s.yaml | kubectl apply -f -
+REF=registry.registry.svc:8080/$APP@$(cat /tmp/$APP-digest)   # the image Build and push pushed
+sed -e "s#__APP__#$APP#g" -e "s#__IMAGE__#$REF#" -e "s#__HOST__#$APP.$APPS_DOMAIN#" deploy/k8s.yaml | kubectl apply -f -
 kubectl annotate deploy/$APP kubernetes.io/change-cause="$IMAGE" --overwrite
 kubectl rollout status deploy/$APP --timeout=3m
 curl -fsS "https://$APP.$APPS_DOMAIN/healthz"
-test "$(kubectl get pod -l app=$APP -o jsonpath='{range .items[*]}{.status.containerStatuses[0].imageID}{"\n"}{end}' | sort -u)" = \
-  "registry.registry.svc:5000/$APP@$(jq -r '."containerimage.digest"' /tmp/$APP-build.json)" && echo 'digest ok'
+# Pods of the previous version may still be terminating, so only the others count.
+test "$(kubectl get pod -l app=$APP -o go-template='{{range .items}}{{if not .metadata.deletionTimestamp}}{{(index .status.containerStatuses 0).imageID}}{{"\n"}}{{end}}{{end}}' | sort -u)" = \
+  "$REF" && echo 'digest ok'
 ```
 
 Then fetch the page or endpoint the change affects with `curl -fsS https://$APP.$APPS_DOMAIN/<path>`
@@ -180,6 +203,52 @@ sizes; never print a value.
 Give each provided value its own Secret, so replacing one touches only it. Pods read Secrets when
 they start: run `kubectl rollout restart deploy/$APP` after a change.
 
+## Compute tasks
+
+Short, CPU-heavy work the user asks to run in the cluster, such as a test or simulation sweep,
+runs as a Job in the namespace `tasks`, on the burst machines, never in `apps`. Build and push
+its image as in Build and push, and set `REF` as in Deploy. While every burst machine is off, its pods stay
+Pending: tell the user to boot one. A shutdown stops the pods within 9.5 minutes, and the Job
+runs them again from the start, so write results somewhere outside the pod (logs, or the
+internet) as they come.
+
+```sh
+NAME=sweep-$(date +%s)
+kubectl -n tasks apply -f - <<EOF
+apiVersion: batch/v1
+kind: Job
+metadata: {name: $NAME}
+spec:
+  completions: 16          # one pod per shard; JOB_COMPLETION_INDEX is 0 to completions-1
+  parallelism: 8
+  completionMode: Indexed
+  backoffLimitPerIndex: 1
+  ttlSecondsAfterFinished: 86400
+  podFailurePolicy:        # a burst machine's shutdown does not count as a failure
+    rules: [{action: Ignore, onPodConditions: [{type: DisruptionTarget, status: "True"}]}]
+  template:
+    spec:
+      restartPolicy: Never
+      securityContext: {runAsNonRoot: true, runAsUser: 1000, seccompProfile: {type: RuntimeDefault}}
+      containers:
+      - name: task
+        image: $REF
+        resources:
+          requests: {cpu: "4", memory: 4Gi}   # size to the work; no CPU limit, it uses free cores
+          limits: {memory: 4Gi}
+        securityContext: {allowPrivilegeEscalation: false, capabilities: {drop: [ALL]}}
+EOF
+# Until the Job completes or fails; `kubectl wait` would wait out its timeout on a failure.
+until kubectl -n tasks get job/$NAME -o jsonpath='{.status.conditions[?(@.status=="True")].type}' |
+  grep -qwE 'Complete|Failed'; do sleep 30; done
+kubectl -n tasks get job/$NAME   # COMPLETIONS, and STATUS Complete or Failed
+kubectl -n tasks logs -l job-name=$NAME --prefix --tail=-1
+```
+
+All tasks together may request 64 CPU and 96 GiB (`kubectl -n tasks describe quota tasks`). A
+failed Job keeps its pods for `kubectl -n tasks logs`; delete it with `kubectl -n tasks delete job
+$NAME` when done.
+
 ## Roll back
 
 ```sh
@@ -191,19 +260,6 @@ kubectl rollout status deploy/$APP --timeout=3m
 
 `rollout undo` changes only the pod template, and the next deploy applies the manifest again, so
 fix the code too.
-
-## Run on a schedule
-
-Only when the user asks, and only if the cluster runs the optional downscaler (ask the user; you
-cannot see it). It scales the app to zero outside the window:
-
-```sh
-kubectl annotate deploy/$APP downscaler/uptime="Mon-Fri 08:00-20:00 Europe/Berlin" --overwrite
-kubectl annotate deploy/$APP downscaler/uptime-   # run all the time again
-```
-
-Use the user's time zone (ask if unknown; the orb's clock is UTC), and deploy and check inside the
-window: outside it the URL does not answer.
 
 ## Remove
 

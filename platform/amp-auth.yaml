@@ -1,6 +1,5 @@
-# Not a cluster resource: the K3s server's API authentication config. `node-prep.sh server`
-# copies it to /etc/rancher/k3s/amp-auth.yaml and points kube-apiserver at it in
-# /etc/rancher/k3s/config.yaml.d/50-amp-apps.yaml. The API then also accepts the ID tokens orbs
+# Not a cluster resource: the K3s server's API authentication config. nixos.nix installs it as
+# /etc/rancher/k3s/amp-auth.yaml and points kube-apiserver at it. The API then also accepts the ID tokens orbs
 # mint with `amp orb id-token --audience k3s-apps`, as the user amp:<Amp user ID> of the thread's
 # creator.
 # What that user may do in the apps namespace is up to its RoleBinding (docs/reference.md, Apps platform);

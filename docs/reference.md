@@ -5,31 +5,39 @@ How the setup works, what it changes in Amp's chart and why, and what was measur
 
 ## What the overlay changes
 
-The repo is a Helm post-renderer: Helm renders Amp's chart, pipes the YAML to `post-render.sh`,
-and kustomize applies `kustomization.yaml` before anything reaches the cluster. It changes:
+The repo is a NixOS module. At build time, [`orbs.nix`](../orbs.nix) pulls Amp's chart (pinned
+by hash), renders it with `helm template`, and changes the result with Nix functions; the module
+hands it to K3s as the auto-deploying manifest `amp-orbs`, which K3s applies on every start and
+change. Each patch names the resource, container, volume or argument it changes, and the build fails when
+a new chart renamed or removed it. Helm's pre-install hook, the `substrate-bootstrap` Job, becomes a
+plain Job named after a hash of the hook resources, so a new chart runs a new one.
+[`provider.nix`](../provider.nix) patches the provider's own code at build time, and the provider
+container mounts the result from the server's Nix store. The root-only
+`amp-orbs-secrets.service` creates the Secrets from files, so none enters the Nix store. It changes:
 
 - Postgres: a 5 GiB volume instead of 500 GiB; requests 250m CPU and 512 MiB instead of 2 CPU
   and 1 GiB; limits 2 CPU and 1 GiB instead of 16 CPU and 2 GiB. Its `podcert-agent` init
   container runs as root, because Postgres refuses a TLS key owned by another user.
 - `ate-api-server` and `ate-idp-server`: 2 replicas become 1.
 - Snapshots: go to an in-cluster [Versity S3 Gateway](https://github.com/versity/versitygw)
-  instead of AWS. It stores each object as a file encrypted with gocryptfs, on a local volume or
-  an NFS export on your NAS (see [Snapshot store](#snapshot-store) and
+  instead of AWS. It stores each object as a file encrypted with gocryptfs, on an NFS export on
+  your NAS (see [Snapshot store](#snapshot-store) and
   [Snapshot encryption](#snapshot-encryption)).
 - atelet: the EKS image credential provider is removed, so the public images are pulled
   anonymously. Snapshot uploads run one at a time with more time each, and the local copy is
   kept for a day (see [Snapshot timing](#snapshot-timing)).
-- Memory snapshots: the provider patches two settings in its own code at start, so a pause
+- Memory snapshots: the build patches two settings in the provider's code, so a pause
   saves process memory too and returns before the upload (see
   [Memory snapshots](#memory-snapshots)).
 - Worker size: the same patch gives each orb's worker pod its memory plus 128 MiB instead of
-  plus 1 GiB, and has it request 750m CPU instead of 1 CPU (see [Sizing](#sizing)).
+  plus 1 GiB, and has it request its whole CPU, its limit, instead of 1 CPU (see [Sizing](#sizing)).
 - CPU under load: Substrate's containers that request no CPU get small requests (350m in total),
   the snapshot gateway requests 250m and atelet's objectstore plugin 100m, and the provider's
   probes get 10 s instead of 1 s, so busy orbs do not starve the control plane, stall snapshot
   uploads or get the provider restarted.
 - Warm workers: one idle `small` worker, the default type, instead of one 16-CPU, 32 GiB
-  worker, and no extra workers to fill a node's free room.
+  worker, and no extra workers to fill a node's free room. On a 16-CPU server a spawn on it took
+  about 10 s, and a cold one 22 s.
 - earlyoom: the same patch starts earlyoom in every orb, so a runaway process is stopped
   before the orb runs out of memory (see [Running out of memory](#running-out-of-memory)).
 
@@ -64,14 +72,16 @@ image.
 
 ## Sizing
 
-Each running orb reserves `memoryGi` plus 128 MiB on a node and requests 750m CPU at any size;
-its type's CPU is only its limit. A node fits as many orbs as both allow: a 64 GiB machine with
-12 cores fits about seven `medium` (8 GiB) orbs or fourteen `small` (4 GiB) orbs next to the
-control plane. Each orb also uses disk on its node: the 7 GiB orb image once per node, plus
+Each running orb reserves `memoryGi` plus 128 MiB on a node and requests its type's whole CPU,
+which is also its limit. A node fits as many orbs as both allow, after 1 CPU the module reserves
+for K3s and the host (`kubeReserved` and `systemReserved`, 500m each) and the control plane's
+requests on the server: a 64 GiB machine with 12 cores fits about seven `medium` (8 GiB, 4 CPU)
+orbs by memory but only two by CPU, and about four `small` (4 GiB, 2 CPU) orbs. Each orb also uses disk on its node: the 7 GiB orb image once per node, plus
 whatever the orb writes.
 
-The CPU request decides how many busy orbs share the cores, because K3s reserves no CPU for the
-host by default. On the [Performance](#performance) machine (4 cores), 750m fits three `tiny`
+Orbs request their whole CPU because they are rarely idle: compilers and browsers keep them
+busy, and every orb slows down when a node admits more orb CPU than it has. Earlier versions
+requested 750m. On the [Performance](#performance) machine (4 cores), 750m fit three `tiny`
 orbs. Three orbs running a CPU and file-writing loop together left about a quarter of the CPU
 idle. At 250m, six fit and kept the CPU saturated: their jobs ran 4 to 7 times slower, the
 provider's probes timed out and the kubelet restarted it, spawns took up to 94 s, and orbs'
@@ -86,8 +96,8 @@ builds, and earlyoom killed `tsc` once. For builds, use `small` and plan on abou
 An orb holds its worker until it pauses, at least 5 minutes after its agent goes idle. A spawn
 that finds no free worker waits about 9.5 minutes for one, then fails, and Amp retries it. So
 when more orbs start at once than fit, expect some to fail once before they run. After orbs
-pause, the provider waits 10 minutes before it shrinks the pool back to its warm workers, so
-their idle workers keep their CPU and memory requests until then.
+pause, the provider waits 10 minutes before it shrinks the pool back to its warm worker, so
+the idle workers keep their CPU and memory requests until then.
 
 The chart gives each worker pod 1 GiB on top of the orb's memory. The worker keeps only 64 MiB of
 that for itself, kills an orb that stays over its own `memoryGi`, and limits a pause's page cache
@@ -103,35 +113,43 @@ keeps its latest snapshot on its node for a day (see [Snapshot timing](#snapshot
 its two newest in the snapshot store: a pause deletes the snapshot before the previous one. On
 the [Performance](#performance) test, an orb holding 1 GiB took about 2 × 1.4 GB in the store.
 
-### A bigger server
+### Machine roles
 
-When the K3s server is much bigger than the agents, run the shared services on it so the agents'
-CPU goes to orbs: uncomment `server-node` under `components` in `kustomization.yaml` and upgrade.
-That component makes the Deployments and Postgres prefer nodes labelled
-`node-role.kubernetes.io/control-plane` (K3s's servers), and raises the snapshot gateway's CPU
-request from 250m to 1 CPU: in a wake of three orbs from the NAS it used about 1 core, and the
-node ran out of CPU. atelet and its objectstore plugin still run on every node, because they
-handle that node's own orbs. Postgres keeps its local volume on the node it first ran on, so on
-an existing cluster it stays where it is.
+Each machine has a `role` in the module:
 
-Reserve some of the server for K3s and the host, in `/etc/rancher/k3s/config.yaml` before
-installing K3s (or followed by `systemctl restart k3s`):
+- **server:** the control plane and the shared services, which are required to run here
+  (`node-role.kubernetes.io/control-plane`): Postgres keeps its local volume on the node it first
+  ran on, and the other machines may be off. It runs orbs too. In a wake of three orbs from the
+  NAS the snapshot gateway used about 1 core; on a busy server, raise its CPU request in
+  `orbs.nix` from 250m.
+- **apps:** the apps platform and the apps; apps also run on the server. It has no
+  `ate.dev/sandboxClass` label, so atelet does not run there, and a `NoSchedule` taint that orb workers do not tolerate, so no orb runs
+  there. The platform's namespaces carry `PodNodeSelector` and `PodTolerationRestriction`
+  annotations, which the API server adds to every pod in them: a selector for the machine's
+  `amp-orbs/role=apps` label (`amp-orbs/runs-apps=true` in `apps`, which the server has too) and a
+  toleration for its taint. An agent cannot move an app off these machines: a pod's own
+  conflicting selector is refused.
+- **burst:** orbs, when the others are full: a `PreferNoSchedule` taint makes the scheduler pick
+  it last, though not strictly. Its shutdown waits up to 15 minutes: the kubelet's graceful
+  shutdown stops the orb workers first, which suspend their orbs, then gives atelet, a critical
+  pod, its 330 s to upload the snapshots to the NAS. Not tested yet: whether atelet finishes
+  every upload in that time. A snapshot it did not upload stays only on the burst machine, and
+  waking that orb elsewhere fails, which deletes it (see [Snapshot store](#snapshot-store)); boot
+  the machine again before waking such an orb. It also runs tasks, short compute-heavy Jobs such
+  as test sweeps (see [Tasks](#tasks)), and never apps: it has no `amp-orbs/runs-apps` label.
 
-```yaml
-disable: [traefik, servicelb]
-node-ip: 192.168.1.10 # the server's LAN IPv4 address; see below
-kubelet-arg:
-  - kube-reserved=cpu=500m,memory=512Mi
-  - system-reserved=cpu=500m,memory=512Mi
-```
+K3s adds a machine's labels again each time it starts, but its taints only when the node first
+registers. To change a machine's role later, remove the old label and change its taints with
+`kubectl label` and `kubectl taint` as well, or delete the node and restart K3s on it.
 
-Set `node-ip` on every node, agents included, to its LAN IPv4 address. Otherwise K3s also records
+The module sets `nodeIP` on every node to its LAN IPv4 address. Otherwise K3s also records
 the node's IPv6 address, and when the router hands out a new IPv6 prefix, K3s exits on its next
 start ("NodeIPs changed for the node") before systemd restarts it.
 
 On a server with 8 cores, 16 threads and 24 GB, memory runs out first: after the reservation and
-the control plane, about 4 `small` or 7 `tiny` orbs fit, because the idle warm `small` worker
-keeps its 4 GiB while only `tiny` orbs run. Those orbs can use at most 8 or 7 threads between
+the control plane, 4 `small` orbs fit, the warm worker counted as one, or 1 `small` and about 7
+`tiny` (measured: 23868316Ki allocatable, 2412Mi requested before any orb). Those orbs can use at
+most 8 or 9 threads between
 them, so the shared services keep the rest even when every orb is busy.
 
 ### Running out of memory
@@ -141,7 +159,7 @@ warning and stopped nothing with an orb at 88% of its memory. Without help, one 
 too far takes the whole orb with it: the worker kills the sandbox, and the provider deletes the
 orb with its snapshots, so uncommitted and unpushed work in it is lost.
 
-So [`provider-patch.yaml`](../provider-patch.yaml) starts every new orb with a short shell wrapper
+So [`provider.nix`](../provider.nix) starts every new orb with a short shell wrapper
 instead of Amp's `orbd` directly. The wrapper installs Debian's
 [earlyoom](https://github.com/rfjakob/earlyoom) in the background, retrying until apt works,
 runs it as `earlyoom -m 10 -r 3600 --avoid '^(orbd|amp|dockerd|containerd)$'` and restarts it if
@@ -159,17 +177,12 @@ one it stops. Orbs created before the patch keep their old setup until they are 
 
 ### Snapshot store
 
-Paused orbs live in the `versitygw` pod, one encrypted file per object, under `encrypted/` on its
-volume. By default that is a local-path volume under `/var/lib/rancher/k3s/storage` on whichever
-node runs the pod.
-
-To keep them on a NAS instead, set the export's server and path in
-[`nas-patch.yaml`](../nas-patch.yaml), uncomment it in `kustomization.yaml`, and install `nfs-common`
-on every node. The gateway needs write access to the export. Object metadata goes in files under
+Paused orbs live in the `versitygw` pod on the server, one encrypted file per object, under
+`encrypted/` on the NFS export `services.amp-orbs.nas` names. The gateway needs write access to
+the export. Object metadata goes in files under
 `meta/` next to `data/` inside the encrypted store, so NFSv3, which has no extended attributes,
 works too; Versity calls this mode experimental. It passed the S3 calls Substrate makes on an NFSv3
-export with `all_squash`, as the UNAS sets up its shared drives. On an existing install, switching
-deletes the local volume and every paused orb in it.
+export with `all_squash`, as the UNAS sets up its shared drives.
 
 For a UniFi UNAS: enable NFS in UniFi Drive > Settings > Services, create a shared drive, and
 leave it in the default Collaborative (all squash) mode. Its export path is
@@ -195,7 +208,7 @@ writes every object through [gocryptfs](https://nuetzlich.net/gocryptfs/), so it
 NFS traffic to a NAS, only carry file contents and names encrypted with AES-256-GCM. Substrate and
 the S3 API see plain objects.
 
-- **Key:** `snapshots.key` becomes the Secret `orb-snapshots-key`, which only the gateway mounts.
+- **Key:** `/var/lib/amp-orbs/snapshots.key` on the server becomes the Secret `orb-snapshots-key`, which only the gateway mounts.
   gocryptfs keeps its master key in `encrypted/gocryptfs.conf`, encrypted with it. Without the key
   the store can't be read; keep a copy outside the cluster. A wrong key stops the gateway, and its
   log says `Password incorrect`.
@@ -243,19 +256,20 @@ The overlay changes these atelet defaults for a homelab store:
 
 Amp's provider asks for file-only snapshots: a resumed orb keeps its files, but its processes
 start again. Substrate's gVisor worker can also save process memory (`runsc checkpoint`), and
-[`provider-patch.yaml`](../provider-patch.yaml) turns that on. It also makes a pause return as soon
+[`provider.nix`](../provider.nix) turns that on. It also makes a pause return as soon
 as the snapshot is on the node's disk, while the upload to the gateway continues in the
 background, so a pause takes a few seconds instead of waiting for the upload.
 
-The provider has no setting for either, so the patch replaces two exact strings in its code, plus a
-third for the worker size and a fourth for earlyoom, when the container starts. It refuses to start
-if a string is not found exactly once, so a chart that moves them fails loudly (the provider logs
-`k3s patch: found 0 times`) instead of silently running without it. Then remove the patch from
-`kustomization.yaml` and upgrade: new orbs take file-only snapshots and run without earlyoom.
+The provider has no setting for either, so the build replaces two exact strings in its `main.js`,
+plus two for the worker's memory and CPU and one for earlyoom. The build fails unless each string
+occurs exactly once (`the provider has 0 occurrences of …`), so a chart that moves them cannot
+silently run without them. To run without the patches, remove the `provider-main` volume and mount
+from the `amp-orb-provider` patch in `orbs.nix` and deploy: new orbs take file-only snapshots and
+run without earlyoom.
 The chart's default is file-only, so memory snapshots are less tested.
 
 To use file-only snapshots and keep the other patches, delete the `SNAPSHOT_FIDELITY_MEMORY` entry
-from the list in `provider-patch.yaml` and upgrade. The provider writes the setting into the
+from the list in `provider.nix` and deploy. The provider writes the setting into the
 template each orb is created from, and a wake does not read the template again, so an orb keeps
 the kind of snapshot it was created with for life: switching affects only orbs created afterwards.
 
@@ -292,8 +306,8 @@ Things to know:
 The same cluster hosts long-running apps next to the orbs, like self-hosted Amp Boxes. An agent
 builds an app's image in the cluster, deploys it, and you open it at
 `https://<app>.apps.example.com` from any device on your tailnet. It lives in
-[`platform/`](../platform). `install.sh` sets it up with the orbs (see the README), and
-`install.sh --orbs-only` leaves it out; the orbs neither use nor need it.
+[`platform/`](../platform). The module always installs it with the orbs
+(see the README); the orbs neither use nor need it.
 
 - **Traefik** ([`traefik.yaml`](../platform/traefik.yaml)) is the single entry point. Each app is a
   Deployment, a Service and an Ingress with its own hostname, served with one wildcard
@@ -316,21 +330,21 @@ builds an app's image in the cluster, deploys it, and you open it at
 - **Agent access** ([`amp-auth.yaml`](../platform/amp-auth.yaml)): orbs sign in to the K3s API with
   Amp's workload identity, a 10-minute token `amp orb id-token` mints for each command, so no
   credential is stored anywhere. The API sees the thread's creator as `amp:<Amp user ID>`, and a
-  RoleBinding per user gives the Role `agent` in `apps` only: nothing in `amp-orbs`, `ate-system`
-  or the nodes.
-- **Images** ([`registry.yaml`](../platform/registry.yaml), [`buildkit.yaml`](../platform/buildkit.yaml)):
-  an in-cluster registry, and rootless BuildKit, which agents drive with `buildctl` over mutual
-  TLS, since Docker inside a gVisor orb cannot build. Build steps reach the internet but not the
-  LAN or the rest of the cluster.
+  RoleBinding per user gives the Role `agent` in `apps`, and one in `tasks` (see [Tasks](#tasks)):
+  nothing in `amp-orbs`, `ate-system` or the nodes.
+- **Images** ([`registry.yaml`](../platform/registry.yaml)): an in-cluster registry. Docker inside
+  a gVisor orb cannot build, so agents build each app's image with Nix in their orb
+  (`dockerTools`, from the app's `flake.nix`) and push it with `skopeo` over plain HTTP. Apps need
+  a `flake.nix`; a Dockerfile alone cannot be built. The registry has no login: orbs reach it,
+  and apps and tasks do not. Any orb could replace a tag, so the skill deploys the digest it
+  pushed.
 - **Agents' instructions**: the skill
   [`deploying-k3s-apps`](../skills/deploying-k3s-apps/SKILL.md) covers setup in an orb, build, push,
   deploy and its checks, Secrets the user types in themselves, roll back with `kubectl rollout
-  undo`, run schedules, and removal. It deploys only when the user asks.
-- **Optional:** [GoKubeDownscaler](https://kube-downscaler.io) for run schedules
-  ([`downscaler.yaml`](../platform/downscaler.yaml)).
+  undo`, and removal. It deploys only when the user asks.
 
-Together the platform requests about 0.2 CPU and 600 MiB, plus the Tailscale proxy. Charts are
-pinned (Traefik 42.4.0, cert-manager v1.21.3, Tailscale operator 1.104.7, GoKubeDownscaler 1.4.3)
+Together the platform requests about 0.1 CPU and 320 MiB, plus the Tailscale proxy. Charts are
+pinned (Traefik 42.4.0, cert-manager v1.21.3, Tailscale operator 1.104.7)
 and installed by K3s's own Helm controller, so no Helm is needed for them.
 
 ### What orbs can reach
@@ -342,36 +356,54 @@ through the egress gateway, which resolves names with the cluster's DNS:
   certificate. Orbs get no ServiceAccount token, and an anonymous request gets 401, so only a
   token the API accepts gets in.
 - **Services**: TLS to any port by hostname (`metrics-server.kube-system.svc` answered 403), and
-  cleartext HTTP on ports 80, 8080, 8000 and 3000 only. So `buildctl` over TLS works, and the
-  registry (plain HTTP on 5000) is out of reach, which is fine: BuildKit pushes, and nodes pull.
+  cleartext HTTP on ports 80, 8080, 8000 and 3000 only, which is why the registry listens on
+  8080.
 - **Apps**: through Traefik only. NetworkPolicies see the egress gateway's pod in `ate-system` as
   the source, not the orb, and the policy in `apps` admits only Traefik and other apps.
 - The chart's `ate-system-observability` policy admits every pod to metrics ports, so orbs can
   read `ate-system` metrics over HTTP on 8080 (`ate-controller` answered). This overlay does not
   change that.
 
-### Apps next to orbs
+### Apps and orbs
 
-Apps and orbs share the nodes, and the scheduler places both by their requests: an orb reserves
-its memory plus 128 MiB and 750m CPU, and an app container its own requests (50m and 128 MiB when
-it sets none, with a memory limit equal to that). Neither can be scheduled onto memory the other
-reserved, and when the CPU is busy each gets a share in proportion to its requests. The quota in
-`apps.yaml` caps all apps together at 3 CPU and 6 GiB of requests and 8 GiB of limits; size it to
-what you want to leave for orbs.
+Apps run on the apps machine and the server, wherever the scheduler finds room; orbs never run
+on the apps machine (see [Machine roles](#machine-roles)). The `apps` namespace selects nodes
+labelled `amp-orbs/runs-apps=true`, which the module sets on both. The rest of the platform
+(Traefik, the registry, cert-manager, the Tailscale operator) stays on the apps
+machine. On the server, an app's memory request comes out of what orbs can reserve. Unlike
+orbs, apps mostly idle, so they are overprovisioned on CPU: an app container that sets nothing
+requests 50m and has no CPU limit, so it uses whatever CPU its machine has free, and its
+memory limit equals its 128 MiB request. The quota in `apps.yaml` caps all apps together at
+3 CPU and 6 GiB of requests and 8 GiB of limits; raise it to what the apps machine holds.
 
-For a hard split, give apps a machine of their own: leave it without the
-`ate.dev/sandboxClass=gvisor` label, so orbs never run there, and pin the `apps` namespace to it
-with Kubernetes' `PodNodeSelector` admission plugin (`kube-apiserver-arg:
-enable-admission-plugins=NodeRestriction,PodNodeSelector` in the server's config, and the
-namespace annotation `scheduler.alpha.kubernetes.io/node-selector`). This has not been tried here.
+### Tasks
+
+Short, compute-heavy work, such as a test or simulation sweep, runs as Jobs in the namespace
+`tasks` ([`tasks.yaml`](../platform/tasks.yaml)), on the burst machines only. The namespace
+selects nodes labelled `amp-orbs/role=burst`, which only burst machines have, and an agent cannot
+move a task elsewhere: a conflicting selector is refused, and any other is added to it. Apps stay
+off the burst machines the same way, since those lack `amp-orbs/runs-apps=true`. While every
+burst machine is off, tasks wait Pending.
+
+The rest matches `apps`, without the serving: Pod Security `restricted`; a quota (64 CPU, 96 GiB
+of requests); containers that set nothing get 1 CPU and 1 GiB, with no CPU limit; tasks reach
+each other, Traefik, the cluster's DNS and the internet. The Role `agent` there covers Pods, Jobs,
+ConfigMaps and Secrets, and no Services, Ingresses or volumes. Images come from the same registry;
+every node pulls from it.
+
+Tasks share the burst machines with orbs. Orbs request their whole CPU, so tasks without a CPU
+limit use only what orbs leave free, and the quota keeps room for orbs that overflow from the
+server. A burst machine's shutdown gives its tasks up to 9.5 minutes to stop (the 15 minutes less
+atelet's 330 s); a Job then runs that pod again on another burst machine, from the start, once
+one is up. Not tested yet on a burst machine.
 
 The registry keeps every image pushed. To free its disk, delete old tags and run, while nobody
 pushes, `kubectl -n registry exec deploy/registry -- registry garbage-collect --delete-untagged
-/etc/distribution/config.yml`. BuildKit keeps at most 20 GB of build cache.
+/etc/distribution/config.yml`.
 
 ### kubectl over Tailscale
 
-Set `apiServerProxyConfig.mode` to `"true"` in `platform/tailscale.yaml`, apply it, and grant
+Set `apiServerProxyConfig.mode` to `"true"` in `platform/tailscale.yaml` (in your fork or branch of this repo), deploy, and grant
 yourself access in the tailnet policy. This maps tailnet admins to cluster admins:
 
 ```json
@@ -386,30 +418,6 @@ yourself access in the tailnet policy. This maps tailnet admins to cluster admin
 Then `tailscale configure kubeconfig k3s-operator` on your machine. For narrower access,
 impersonate a group of your own and bind it with a RoleBinding, such as `edit` in `apps`. Not
 tested yet.
-
-### Schedules
-
-Uncomment `downscaler.yaml` in `platform/kustomization.yaml` and apply. It acts only on `apps`,
-on workloads annotated with a schedule, such as
-`kubectl -n apps annotate deploy/crm downscaler/uptime="Mon-Fri 08:00-20:00 Europe/Berlin"`.
-
-### Remove it
-
-Delete Traefik first, while the Tailscale operator still runs to remove its proxy:
-
-```sh
-kubectl delete -f platform/traefik.yaml
-kubectl delete -k platform/certs
-kubectl delete -k platform
-kubectl delete -f platform/downscaler.yaml --ignore-not-found
-```
-
-On the server, delete `/etc/rancher/k3s/config.yaml.d/50-amp-apps.yaml` and
-`/etc/rancher/k3s/amp-auth.yaml`, and on every node `/etc/rancher/k3s/registries.yaml`, then
-restart K3s. Upgrade from then on with `./install.sh --orbs-only`. Remove the `k3s-apps` and
-`k3s-operator` devices from your tailnet. This deletes the apps, the registry and their volumes.
-cert-manager's CRDs stay; delete them with
-`kubectl delete crd -l app.kubernetes.io/instance=apps-cert-manager`.
 
 ## Troubleshoot
 
@@ -429,39 +437,46 @@ issue the wildcard alone, a different set of names with its own limit:
 kubectl -n traefik patch certificate wildcard --type=merge -p '{"spec":{"dnsNames":["*.<domain>"]}}'
 ```
 
-The next `install.sh` run restores both names, so run it only after the retry time.
+K3s restores both names when it next applies the manifests (on a restart or a deploy that changes
+them), so do either only after the retry time.
 
-To replace the provider token in the cluster:
+To replace the provider token, write the new one to `/var/lib/amp-orbs/orb-provider-token`, then:
 
 ```sh
-read -rsp 'Provider token: ' T; printf '\n'
-kubectl -n amp-orbs create secret generic amp-orb-spawner --from-literal=AMP_ORB_PROVIDER_TOKEN="$T" \
-  --dry-run=client -o yaml | kubectl apply -f -; unset T
+systemctl restart amp-orbs-secrets
 kubectl -n amp-orbs rollout restart deployment/amp-orb-provider
 ```
 
+If the manifests do not seem applied, `kubectl -n kube-system get addon` lists each one K3s
+applied, and `kubectl -n kube-system describe addon amp-orbs` and `journalctl -u k3s` show why one
+failed. The bootstrap Job's log is `kubectl -n amp-orbs logs job/substrate-bootstrap-<hash>`.
+
 ## Upgrade
 
-This overlay is checked against chart 0.20261109.1946, which `install.sh` pins. To upgrade, pull
-the repo and run `./install.sh` again (with `--orbs-only` if you installed that way). It applies
-`values.yaml`, the overlay and `platform/` as they are in the repo, and reads the apps' domain
-from the installed certificate, so `APPS_DOMAIN` is only needed the first time.
+This overlay is checked against chart 0.20261109.1946, which `orbs.nix` pins by version and hash.
+To upgrade, update the flake input (`nix flake update amp-k3s`) and deploy. To try a new chart,
+run `./update-chart.sh` (or `./update-chart.sh <version>`): it moves `orbs.nix` to the newest
+chart, refills the chart's and the provider `main.js`'s hashes, and renders the manifest, which
+fails if a patch no longer applies. Then check that the provider's patches still mean what they
+did, and test on a cluster before committing.
+
+K3s deletes the resources a new version leaves out of a manifest, as Helm did, but not those of a
+manifest file that is removed. So removing a namespace from `orbs.nix` deletes it and everything
+in it, including the snapshot gateway and Postgres.
 
 Before moving to a new chart version, read `changelog.md` in Amp's
 [install bundle](https://ampcode.com/docs/orbs/self-hosted/bundle.zip) for releases that need a
-manual step. The render fails if the chart renames Postgres or the replica targets, or moves the
-atelet arguments, mounts and init containers the overlay patches. It cannot catch a renamed
-atelet, `ate-api-server` or `amp-orb-provider` workload: those patches would be skipped, and
-snapshots would go to AWS or lose their memory. If the provider's patched strings move, the
-provider fails to start; see [Memory snapshots](#memory-snapshots).
+manual step. The build fails if the chart renames or removes any workload, container, volume or
+argument the overlay patches, or if any string the provider's patches replace no longer occurs
+exactly once; see [Memory snapshots](#memory-snapshots).
 
 ## Uninstall
 
 Delete the provider in Amp first. That revokes its token, and threads on it stop working. Then
-remove the chart and what Helm leaves behind:
+remove `services.amp-orbs` from the machines' configuration and deploy, which stops K3s. To
+clean up a cluster you keep running for other things, delete what K3s leaves behind:
 
 ```sh
-helm uninstall orb-provider -n amp-orbs
 kubectl delete ns amp-orbs ate-system otel-system podcertificate-controller-system --ignore-not-found
 kubectl delete crd actortemplates.ate.dev csidriverconfigs.ate.dev sandboxconfigs.ate.dev workerpools.ate.dev --ignore-not-found
 kubectl delete clusterrole,clusterrolebinding amp-orb-provider-nodes ate-api-server ate-controller \
@@ -470,5 +485,6 @@ kubectl delete validatingadmissionpolicy,validatingadmissionpolicybinding sandbo
 kubectl delete role,rolebinding atenet-dns -n kube-system --ignore-not-found
 ```
 
-Deleting `ate-system` also deletes the gateway. With the default local volume, that deletes
-every paused orb; on an NFS share the files stay, readable only with `snapshots.key`.
+Deleting `ate-system` also deletes the gateway. The files on the NAS stay, readable only with
+`snapshots.key`. Removing K3s entirely also leaves `/var/lib/rancher`,
+`/var/lib/ate` and `/var/lib/amp-orbs`.
