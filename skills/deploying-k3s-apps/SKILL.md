@@ -47,23 +47,75 @@ that repository, such as `Amp` and `amp@localhost`.
 
 ```sh
 APP=crm   # lowercase letters, digits and dashes; also the hostname
-kubectl get deploy,svc,ingress $APP --ignore-not-found   # a new app: must print nothing
+# A new app: must print nothing. An old $APP-data volume would hand the app its data.
+kubectl get deploy/$APP svc/$APP ingress/$APP pvc/$APP-data --ignore-not-found
 # creates or updates flake.lock, and commits it if it changed, before the tag is taken
 nix flake lock && git add flake.lock &&
   { git diff --cached --quiet -- flake.lock || git commit -qm 'Lock flake inputs' -- flake.lock; }
 IMAGE=registry.registry.svc:8080/$APP:$(git rev-parse --short HEAD)
-rm -f /tmp/$APP-digest   # Deploy reads it, so a failed run must not leave an older one
+rm -f /tmp/$APP-digest /tmp/$APP-image   # Deploy reads the digest, so a failed run must not leave an older one
 if [ -n "$(git status --porcelain)" ]; then echo 'Commit first (untracked files too)'; else
-  nix build .#image --out-link /tmp/$APP-image &&
+  # In the orb, Nix fails now and then with "unexpected EOF reading a line" (a gVisor bug);
+  # a rerun continues where it stopped.
+  for try in 1 2 3 4 5; do nix build .#image --out-link /tmp/$APP-image && break; done
+  [ -e /tmp/$APP-image ] &&
   nix run nixpkgs#skopeo -- --insecure-policy copy --dest-tls-verify=false \
     --digestfile /tmp/$APP-digest docker-archive:/tmp/$APP-image "docker://$IMAGE" &&
   echo "pushed $IMAGE@$(cat /tmp/$APP-digest)" ||
-  echo 'BUILD OR PUSH FAILED: nothing was pushed. Read the error above; a transient Nix error goes away on a rerun.' >&2
+  echo 'BUILD OR PUSH FAILED: nothing was pushed. Read the error above.' >&2
 fi
 ```
 
-The flake sees only files Git tracks, so commit everything the image needs. A
-static site keeps its pages in `www/`, with a file `www/healthz` containing `ok`, and this
+The flake sees only files Git tracks, so commit everything the image needs.
+
+### Default stack
+
+Unless the user or the repository already chose one, build a web app with Remix 3
+(https://remix.run, not Remix 2 or React Router) and keep its data in SQLite through
+`node:sqlite`, backed up with Litestream (see SQLite with Litestream). Scaffold it with
+`npx -y remix@latest new $APP`, then give `package.json` the `version` that `remix new` leaves
+out, which Nix needs: `npm pkg set version=0.1.0 && npm install --package-lock-only`. Add a
+`/healthz` route that returns `ok`. Remix 3 runs its TypeScript as is, so the image needs no build
+step:
+
+```nix
+{
+  inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+  outputs = { nixpkgs, ... }:
+    let
+      pkgs = nixpkgs.legacyPackages.x86_64-linux;
+      nodejs = pkgs.nodejs_24;
+      pkg = builtins.fromJSON (builtins.readFile ./package.json);
+      app = pkgs.buildNpmPackage {
+        pname = pkg.name;
+        inherit (pkg) version;
+        inherit nodejs;
+        src = ./.;
+        # After every change to package-lock.json: nix run nixpkgs#prefetch-npm-deps -- package-lock.json
+        npmDepsHash = "sha256-...";
+        dontNpmBuild = true;
+      };
+    in {
+      packages.x86_64-linux.image = pkgs.dockerTools.buildLayeredImage {
+        name = "app";
+        extraCommands = "mkdir -m 1777 tmp";
+        config = {
+          User = "1000:1000";
+          WorkingDir = "${app}/lib/node_modules/${pkg.name}";
+          Env = [ "NODE_ENV=production" "PORT=8080" "DATABASE_PATH=/data/app.db" ];
+          Cmd = [ "${nodejs}/bin/node" "--import" "remix/node-tsx" "server.ts" ];
+        };
+      };
+    };
+}
+```
+
+Keep `node_modules` in `.gitignore`. `ERROR: npmDepsHash is out of date` means the lockfile
+changed: compute the hash again.
+
+### Other apps
+
+A static site keeps its pages in `www/`, with a file `www/healthz` containing `ok`, and this
 `flake.nix`:
 
 ```nix
@@ -155,7 +207,9 @@ spec:
   `strategy: {type: Recreate}` on the Deployment. For a database, use SQLite with Litestream
   (below), not a database server.
 - Apps reach each other by Service name, and the internet, but not the LAN or the rest of the
-  cluster.
+  cluster. That includes the Kubernetes API, and you cannot create ServiceAccounts or Roles, so
+  an app that shows cluster state gets it from you: write it with kubectl into a ConfigMap the
+  app mounts, and tell the user it is a snapshot.
 
 ## SQLite with Litestream
 
@@ -201,13 +255,13 @@ the app, which mounts `data` at `/data` too):
       - name: restore
         image: &litestream litestream/litestream:0.5.18@sha256:513bff62a88fc0c86c73d27333c41c54c89fe890a7c32a551600adff9309b11b
         # A new pod's NetworkPolicy takes a few seconds to apply, so retry for up to a minute.
-        command: [sh, -c, 'for i in $(seq 30); do litestream restore -config /etc/litestream/litestream.yml -if-db-not-exists -if-replica-exists /data/app.db && exit 0; sleep 2; done; exit 1']
+        command: [sh, -c, '[ -e /data/app.db ] && { echo "restore: kept the existing database"; exit 0; }; for i in $(seq 30); do litestream restore -config /etc/litestream/litestream.yml -if-replica-exists /data/app.db && { [ -e /data/app.db ] && echo "restore: restored the database from its backup" || echo "restore: no backup, the app starts with an empty database"; exit 0; }; sleep 2; done; exit 1']
         envFrom: [{secretRef: {name: litestream}}]
         volumeMounts: &lsmounts
         - {name: data, mountPath: /data}
         - {name: litestream, mountPath: /etc/litestream}
         resources: &lsresources
-          requests: {cpu: 10m, memory: 32Mi}
+          requests: {cpu: 20m, memory: 32Mi}
           limits: {memory: 128Mi}
         securityContext: &lssecurity {allowPrivilegeEscalation: false, capabilities: {drop: [ALL]}}
       # Runs next to the app for the pod's lifetime and replicates every change.
@@ -224,7 +278,10 @@ the app, which mounts `data` at `/data` too):
       - {name: litestream, configMap: {name: __APP__-litestream}}
 ```
 
-After the deploy, `kubectl logs deploy/$APP -c replicate` shows the replica syncing, and
+After the deploy, `kubectl logs deploy/$APP -c restore` says whether the pod kept, restored or
+started without a database. A backup outlives its app, so on a new app's first deploy it must
+say `no backup`; if it restored, an earlier app of the same name left that data: tell the user
+before going on. `kubectl logs deploy/$APP -c replicate` shows the replica syncing, and
 `kubectl exec deploy/$APP -c replicate -- litestream ltx -config /etc/litestream/litestream.yml
 /data/app.db` lists what is backed up. To test a restore without touching the live database, run
 `litestream restore -config /etc/litestream/litestream.yml -o /tmp/check.db /data/app.db` in that
