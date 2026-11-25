@@ -341,8 +341,9 @@ through the egress gateway, which resolves names with the cluster's DNS:
 - **Services**: TLS to any port by hostname (`metrics-server.kube-system.svc` answered 403), and
   cleartext HTTP on ports 80, 8080, 8000 and 3000 only, which is why the registry listens on
   8080.
-- **SSH**: the gateway refuses it, so every orb sends SSH for `github.com` through Traefik
-  instead: `/etc/ssh/ssh_config.d/github.conf` wraps it in TLS to `github-ssh.<apps' domain>`,
+- **SSH** (temporary workaround, to be removed once the projects that still clone over SSH use
+  HTTPS, which orbs already reach GitHub with): the gateway refuses SSH, so every orb sends SSH
+  for `github.com` through Traefik instead: `/etc/ssh/ssh_config.d/github.conf` wraps it in TLS to `github-ssh.<apps' domain>`,
   and Traefik relays it to github.com:22 and nowhere else
   ([`traefik.yaml`](../platform/traefik.yaml)). GitHub's host keys are preinstalled in the global
   and the user's `known_hosts`, because `ssh-keyscan` cannot use the proxy. SSH to any other host

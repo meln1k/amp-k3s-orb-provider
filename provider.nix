@@ -25,7 +25,8 @@ let
   # and restart earlyoom if it exits. A woken orb keeps both running from its memory snapshot.
   # It also installs the kubectl of the cluster's Kubernetes version (deploying-k3s-apps), checked
   # against the checksum published next to it, retrying until the download works.
-  # SSH to github.com goes through Traefik wrapped in TLS (platform/traefik.yaml), since the
+  # Temporary workaround, to be removed with github-ssh in platform/traefik.yaml once the projects
+  # that still clone over SSH use HTTPS: SSH to github.com goes through Traefik wrapped in TLS, since the
   # egress gateway refuses SSH. GitHub's host keys (api.github.com/meta) go in the user's
   # known_hosts as well as the global one, so a setup script that runs ssh-keyscan only for an
   # unknown github.com, which cannot connect through the gateway, skips it.

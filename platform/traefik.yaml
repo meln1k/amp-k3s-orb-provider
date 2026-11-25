@@ -62,6 +62,7 @@ spec:
         defaultCertificate:
           secretName: wildcard-tls
 ---
+# Temporary workaround, to be removed once the projects that still clone over SSH use HTTPS:
 # SSH to GitHub for orbs, and to nothing else. Their egress gateway passes only TLS that names a
 # server (and plain HTTP), so orbs wrap SSH in TLS to github-ssh.<apps' domain> (provider.nix
 # sets that up in every orb); Traefik unwraps it with the wildcard certificate and relays the
