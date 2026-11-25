@@ -1,5 +1,5 @@
 # Amp's orb provider, patched at build time. The provider has no settings for these, so the build
-# replaces six exact strings in its bundled main.js and fails unless each occurs exactly once.
+# replaces seven exact strings in its bundled main.js and fails unless each occurs exactly once.
 # orbs.nix mounts the result over the original in the provider container. What each patch is for:
 # docs/reference.md, "Memory snapshots", "Sizing" and "Running out of memory".
 { lib, pkgs, image, fail, kubernetesVersion, appsDomain }:
@@ -78,6 +78,9 @@ let
     # Worker pods request the orb's whole CPU, its limit, instead of 1 CPU: compilers and browsers
     # keep orbs busy, and a node that admits more orb CPU than it has slows every orb down.
     [ ''requests:{cpu:"1",memory:e}'' ''requests:{cpu:String(i.cpu),memory:e}'' ]
+    # The pool shrinks to its warm workers after 1 minute oversized instead of 10, so idle
+    # workers stop holding their requests and a pending worker that is no longer needed goes.
+    [ ",aut=6e5," ",aut=6e4," ]
     # Orbs start earlyoom, install kubectl and set up SSH to GitHub, then start orbd.
     [ ''command:["/opt/orbd/orbd"]'' "command:${builtins.toJSON [ "/bin/sh" "-c" start ]}" ]
   ];

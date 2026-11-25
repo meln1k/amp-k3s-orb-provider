@@ -98,8 +98,8 @@ builds, and earlyoom killed `tsc` once. For builds, use `small` and plan on abou
 An orb holds its worker until it pauses, at least 5 minutes after its agent goes idle. A spawn
 that finds no free worker waits about 9.5 minutes for one, then fails, and Amp retries it. So
 when more orbs start at once than fit, expect some to fail once before they run. After orbs
-pause, the provider waits 10 minutes before it shrinks the pool back to its warm worker, so
-the idle workers keep their CPU and memory requests until then.
+pause, the provider waits 1 minute (10 minutes unpatched) before it shrinks the pool back to its
+warm worker, so the idle workers keep their CPU and memory requests until then.
 
 The chart gives each worker pod 1 GiB on top of the orb's memory. The worker keeps only 64 MiB of
 that for itself, kills an orb that stays over its own `memoryGi`, and limits a pause's page cache
