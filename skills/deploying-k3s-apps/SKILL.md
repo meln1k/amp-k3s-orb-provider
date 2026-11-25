@@ -24,8 +24,9 @@ The kubeconfig's namespace is `apps`, so the commands in this skill omit `-n`.
 mkdir -p ~/.kube ~/.config/nix
 # No credential in it: kubectl gets a fresh token from `amp orb id-token` per command.
 (umask 077; printf '%s' "$APPS_KUBECONFIG" > ~/.kube/config)
-# Kubernetes supports a client within one minor version of the server, and the orb's own kubectl
-# may be missing or newer: ask the API for its minor, and install that one if needed.
+# Kubernetes supports a client within one minor version of the server. New orbs install the
+# server's kubectl as they start, but an older orb's may be missing or newer: ask the API for its
+# minor, and install that one if needed.
 jq -r '.clusters[0].cluster["certificate-authority-data"]' <<<"$APPS_KUBECONFIG" | base64 -d > /tmp/k3s-ca.crt
 S=$(printf 'Authorization: Bearer %s\n' "$(amp orb id-token --audience k3s-apps)" |
   curl -fsS --cacert /tmp/k3s-ca.crt -H @- https://kubernetes.default.svc.cluster.local/version |

@@ -4,7 +4,7 @@
 #
 # Each patch names the resource, container, volume or argument it changes and fails the build when
 # a new chart renamed or removed it, so a chart upgrade cannot drop a patch silently.
-{ lib, pkgs, cfg }:
+{ lib, pkgs, cfg, kubernetesVersion }:
 let
   version = "0.20261118.1813"; # the chart the overlay is checked against
 
@@ -130,7 +130,7 @@ let
   providerImage = (builtins.head (builtins.filter (c: c.name == "provider")
     (builtins.head (builtins.filter (r: r.kind == "Deployment" && r.metadata.name == "amp-orb-provider") chartResources))
       .spec.template.spec.initContainers)).image;
-  providerJs = import ./provider.nix { inherit lib pkgs fail; image = providerImage; };
+  providerJs = import ./provider.nix { inherit lib pkgs fail kubernetesVersion; image = providerImage; };
 
   patches = [
     (resource "Deployment" "ate-system" "ate-api-server" [

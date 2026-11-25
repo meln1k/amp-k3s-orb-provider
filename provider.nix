@@ -2,7 +2,7 @@
 # replaces six exact strings in its bundled main.js and fails unless each occurs exactly once.
 # orbs.nix mounts the result over the original in the provider container. What each patch is for:
 # docs/reference.md, "Memory snapshots", "Sizing" and "Running out of memory".
-{ lib, pkgs, image, fail }:
+{ lib, pkgs, image, fail, kubernetesVersion }:
 let
   # main.js from the provider image the chart names, pinned by hash: a new chart's provider
   # fails here first, with the hash to put below once the patches are checked against it. The
@@ -23,7 +23,17 @@ let
   # oom_score is 0 under gVisor, so --avoid keeps Amp's and Docker's daemons out of its choice.
   # The orb image has the package available but not installed; the loops retry until apt works
   # and restart earlyoom if it exits. A woken orb keeps both running from its memory snapshot.
-  earlyoom = ''
+  # It also installs the kubectl of the cluster's Kubernetes version (deploying-k3s-apps), checked
+  # against the checksum published next to it, retrying until the download works.
+  start = ''
+    (
+      u=https://dl.k8s.io/release/v${lib.head (lib.splitString "+" kubernetesVersion)}/bin/linux/amd64/kubectl
+      until /usr/local/bin/kubectl version --client >/dev/null 2>&1; do
+        { curl -fsSLo /tmp/kubectl "$u" && echo "$(curl -fsSL "$u.sha256")  /tmp/kubectl" | sha256sum -c &&
+          install -m 755 /tmp/kubectl /usr/local/bin/kubectl; } || sleep 10
+      done
+      rm -f /tmp/kubectl
+    ) >>/var/log/kubectl-install.log 2>&1 </dev/null &
     (
       while ! command -v earlyoom >/dev/null; do
         DEBIAN_FRONTEND=noninteractive apt-get install -y -q -o DPkg::Lock::Timeout=60 earlyoom ||
@@ -47,8 +57,8 @@ let
     # Worker pods request the orb's whole CPU, its limit, instead of 1 CPU: compilers and browsers
     # keep orbs busy, and a node that admits more orb CPU than it has slows every orb down.
     [ ''requests:{cpu:"1",memory:e}'' ''requests:{cpu:String(i.cpu),memory:e}'' ]
-    # Orbs start earlyoom, then orbd.
-    [ ''command:["/opt/orbd/orbd"]'' "command:${builtins.toJSON [ "/bin/sh" "-c" earlyoom ]}" ]
+    # Orbs start earlyoom and install kubectl, then start orbd.
+    [ ''command:["/opt/orbd/orbd"]'' "command:${builtins.toJSON [ "/bin/sh" "-c" start ]}" ]
   ];
 
   occurrences = s: js: (builtins.length (builtins.split (lib.escapeRegex s) js) - 1) / 2;

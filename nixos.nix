@@ -189,7 +189,7 @@ in
         # The apps platform brings its own Traefik on the tailnet.
         disable = [ "traefik" "servicelb" ];
         manifests = {
-          amp-orbs.content = import ./orbs.nix { inherit lib pkgs cfg; };
+          amp-orbs.content = import ./orbs.nix { inherit lib pkgs cfg; kubernetesVersion = k3s.version; };
         } // lib.mapAttrs' (name: f: lib.nameValuePair "amp-apps-${name}" { source = platform f; }) platformFiles;
         extraFlags = [
           # The API also accepts the Amp ID tokens orbs mint (platform/amp-auth.yaml).
