@@ -90,6 +90,10 @@ printf '%s' "$ORB_PROVIDER_TOKEN" | ssh root@<server> 'umask 077; cat > /var/lib
 After step 4 has started K3s on the server, copy its `/var/lib/rancher/k3s/server/node-token` to
 `/root/k3s-token` (mode 600) on every other machine, without printing it.
 
+With `backups.nas` set (step 4), the server generates `/var/lib/amp-orbs/litestream.key` on its
+first start. The apps' backups on the NAS are encrypted with it and cannot be read without it,
+so have the user copy it off the server right away, such as into their password manager.
+
 ### 3. The orb provider
 
 Create it with `manage_amp` (topic `orb_providers`, operation `create`, scope `personal`). The
@@ -134,6 +138,8 @@ amp-k3s.nixosModules.default
 
     # the server:
     appsDomain = "<domain>";
+    # optional: the apps' SQLite backups, encrypted on an NFS export (docs/reference.md, Backups)
+    # backups.nas = { server = "<NAS IPv4>"; path = "<export>"; };
 
     # every other machine:
     # serverAddr = "https://<server IPv4>:6443";

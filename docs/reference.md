@@ -379,6 +379,28 @@ named, and runs the registry's garbage collection, so no push can race it. The r
 down for that minute or so. To prune now: `kubectl -n registry create job --from=cronjob/registry-prune
 prune-now`; `kubectl -n registry logs deploy/registry -c prune` shows what it removed.
 
+### Backups
+
+Apps keep their data in SQLite on a PersistentVolumeClaim, which lives on one machine's disk, and
+[Litestream](https://litestream.io) streams every change off it (the skill has the pattern). With
+`backups.nas` set, the server runs a second Versity S3 gateway for that,
+[`backups.nix`](../backups.nix), in the namespace `backups`, separate from the snapshot gateway, so
+paused orbs never depend on the NAS:
+
+- **Storage**: the gateway's POSIX backend is a [gocryptfs](https://nuetzlich.net/gocryptfs/)
+  mount on the NFS export's `litestream` directory, so the NAS only holds encrypted file names and
+  contents. gocryptfs's master key is stored on the NAS, encrypted with
+  `/var/lib/amp-orbs/litestream.key`, which the server generates once: without a copy of that file
+  off the server, losing the server loses the backups too. NFS has no extended attributes, so
+  Versity keeps object metadata in sidecar files on the same mount. FUSE needs a privileged
+  container, the only one here.
+- **Access**: apps reach the gateway at `http://versitygw.backups.svc:7070` (a NetworkPolicy on
+  each side allows only that), with the credentials in the Secret `apps/litestream`. Every app
+  shares them, so an app can read or delete another app's backups; agents can read the Secret.
+  The bucket is `litestream`, one path per app.
+- **NAS outages**: the mount is hard, so requests wait while the NAS is away. Litestream keeps
+  the database working locally and catches up afterwards; apps are not affected.
+
 ### kubectl over Tailscale
 
 Set `apiServerProxyConfig.mode` to `"true"` in `platform/tailscale.yaml` (in your fork or branch of this repo), deploy, and grant

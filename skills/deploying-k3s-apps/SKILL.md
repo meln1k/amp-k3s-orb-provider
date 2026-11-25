@@ -152,9 +152,82 @@ spec:
 - The Ingress needs no `tls` section: Traefik serves the wildcard certificate, which covers
   `<app>.$APPS_DOMAIN` but not `a.<app>.$APPS_DOMAIN`, and redirects HTTP to HTTPS.
 - State that must survive a restart goes in a PersistentVolumeClaim, with
-  `strategy: {type: Recreate}` on the Deployment.
+  `strategy: {type: Recreate}` on the Deployment. For a database, use SQLite with Litestream
+  (below), not a database server.
 - Apps reach each other by Service name, and the internet, but not the LAN or the rest of the
   cluster.
+
+## SQLite with Litestream
+
+A PersistentVolumeClaim lives on one machine's disk only. An app that keeps data uses SQLite on
+it, and Litestream streams every change to the cluster's backup gateway, which stores it
+encrypted on the NAS. When the volume is new or lost, the app starts from the last backup. If
+`kubectl get secret litestream` finds nothing, the cluster has no gateway: tell the user the data
+has no backup.
+
+Add this to `deploy/k8s.yaml`, with the app opening `/data/app.db` in WAL mode
+(`PRAGMA journal_mode=WAL`) and leaving checkpoints to Litestream (`PRAGMA wal_autocheckpoint=0`
+if the driver allows it). Keep a single replica: two writers corrupt the backup.
+
+```yaml
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata: {name: __APP__-data}
+spec:
+  accessModes: [ReadWriteOnce]
+  resources: {requests: {storage: 1Gi}}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata: {name: __APP__-litestream}
+data:
+  litestream.yml: |
+    dbs:
+    - path: /data/app.db
+      replica:
+        type: s3
+        bucket: litestream
+        path: __APP__
+        endpoint: http://versitygw.backups.svc:7070
+        region: us-east-1
+```
+
+In the Deployment, set `strategy: {type: Recreate}` and add to the pod spec (`containers` keeps
+the app, which mounts `data` at `/data` too):
+
+```yaml
+      initContainers:
+      # Restores the last backup when the volume has no database yet.
+      - name: restore
+        image: &litestream litestream/litestream:0.5.18@sha256:513bff62a88fc0c86c73d27333c41c54c89fe890a7c32a551600adff9309b11b
+        args: [restore, -config, /etc/litestream/litestream.yml, -if-db-not-exists, -if-replica-exists, /data/app.db]
+        envFrom: [{secretRef: {name: litestream}}]
+        volumeMounts: &lsmounts
+        - {name: data, mountPath: /data}
+        - {name: litestream, mountPath: /etc/litestream}
+        resources: &lsresources
+          requests: {cpu: 10m, memory: 32Mi}
+          limits: {memory: 128Mi}
+        securityContext: &lssecurity {allowPrivilegeEscalation: false, capabilities: {drop: [ALL]}}
+      # Runs next to the app for the pod's lifetime and replicates every change.
+      - name: replicate
+        image: *litestream
+        restartPolicy: Always
+        args: [replicate, -config, /etc/litestream/litestream.yml]
+        envFrom: [{secretRef: {name: litestream}}]
+        volumeMounts: *lsmounts
+        resources: *lsresources
+        securityContext: *lssecurity
+      volumes:
+      - {name: data, persistentVolumeClaim: {claimName: __APP__-data}}
+      - {name: litestream, configMap: {name: __APP__-litestream}}
+```
+
+After the deploy, `kubectl logs deploy/$APP -c replicate` shows the replica syncing, and
+`kubectl exec deploy/$APP -c replicate -- litestream ltx -config /etc/litestream/litestream.yml
+/data/app.db` lists what is backed up. To test a restore without touching the live database, run
+`litestream restore -config /etc/litestream/litestream.yml -o /tmp/check.db /data/app.db` in that
+container and query `/tmp/check.db`.
 
 ## Deploy
 
@@ -268,7 +341,8 @@ fix the code too.
 
 ## Remove
 
-Ask the user first: deleting a PersistentVolumeClaim deletes the app's data.
+Ask the user first: deleting a PersistentVolumeClaim deletes the app's data. Its Litestream backup
+stays on the NAS, and a later app of the same name restores from it.
 
 ```sh
 sed "s#__APP__#$APP#g" deploy/k8s.yaml | kubectl delete -f -

@@ -64,8 +64,9 @@ spec:
     - namespaceSelector:
         matchLabels: {kubernetes.io/metadata.name: traefik}
 ---
-# Apps reach each other, Traefik (so other apps by their public names), the cluster's DNS and the
-# internet, but not the LAN, the NAS, the nodes, the tailnet or anything else in the cluster.
+# Apps reach each other, Traefik (so other apps by their public names), the cluster's DNS, the
+# backup gateway and the internet, but not the LAN, the NAS, the nodes, the tailnet or anything
+# else in the cluster.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -87,6 +88,14 @@ spec:
     ports:
     - {port: 53, protocol: UDP}
     - {port: 53, protocol: TCP}
+  # The backup gateway for their SQLite databases (backups.nix), when the server has one.
+  - to:
+    - namespaceSelector:
+        matchLabels: {kubernetes.io/metadata.name: backups}
+      podSelector:
+        matchLabels: {app: versitygw}
+    ports:
+    - {port: 7070, protocol: TCP}
   - to:
     - ipBlock:
         cidr: 0.0.0.0/0

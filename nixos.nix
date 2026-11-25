@@ -64,6 +64,16 @@ let
     secret tailscale operator-oauth --from-file=client_id=ts-oauth-client-id \
       --from-file=client_secret=ts-oauth-client-secret
     secret cert-manager cloudflare-api-token --from-file=api-token=cloudflare-api-token
+    ${lib.optionalString (cfg.backups.nas != null) ''
+      # Generated once. Without litestream.key the backups on the NAS cannot be read: keep a copy
+      # off this machine (README, step 2).
+      [ -e litestream-s3.env ] || printf 'AWS_ACCESS_KEY_ID=%s\nAWS_SECRET_ACCESS_KEY=%s\n' \
+        "$(openssl rand -hex 10)" "$(openssl rand -hex 24)" > litestream-s3.env
+      [ -e litestream.key ] || openssl rand -base64 32 > litestream.key
+      secret backups versitygw-s3 --from-env-file=litestream-s3.env
+      secret backups litestream-key --from-file=litestream.key
+      secret apps litestream --from-env-file=litestream-s3.env
+    ''}
 
     # CoreDNS reads the custom server blocks only when it starts, so restart it after a change.
     out=$(kubectl apply -f ${platform ./platform/coredns-custom.yaml})
@@ -107,6 +117,20 @@ in
       type = lib.types.strMatching "([a-z0-9]([a-z0-9-]*[a-z0-9])?\\.)+[a-z]{2,}";
       example = "apps.example.com";
       description = "Server only: the apps' domain, in a zone on Cloudflare.";
+    };
+    backups.nas = lib.mkOption {
+      type = lib.types.nullOr (lib.types.submodule {
+        options = {
+          server = lib.mkOption { type = lib.types.str; example = "192.168.1.5"; };
+          path = lib.mkOption { type = lib.types.str; example = "/var/nfs/shared/backups"; };
+        };
+      });
+      default = null;
+      description = ''
+        Server only: an NFS export, writable by root from the server, where apps' SQLite backups
+        (Litestream) are stored, encrypted (backups.nix). They go in its litestream directory.
+        Null: no backup gateway.
+      '';
     };
   };
 
@@ -190,6 +214,8 @@ in
         disable = [ "traefik" "servicelb" ];
         manifests = {
           amp-orbs.content = import ./orbs.nix { inherit lib pkgs cfg; kubernetesVersion = k3s.version; };
+        } // lib.optionalAttrs (cfg.backups.nas != null) {
+          amp-backups.content = import ./backups.nix { inherit (cfg.backups) nas; };
         } // lib.mapAttrs' (name: f: lib.nameValuePair "amp-apps-${name}" { source = platform f; }) platformFiles;
         extraFlags = [
           # The API also accepts the Amp ID tokens orbs mint (platform/amp-auth.yaml).
@@ -218,6 +244,8 @@ in
         '')
       ];
       networking.firewall.allowedTCPPorts = [ 6443 ];
+      # The kubelet mounts the NAS for the backup gateway (backups.nix).
+      boot.supportedFilesystems = lib.mkIf (cfg.backups.nas != null) [ "nfs" ];
 
       systemd.tmpfiles.rules = [ "d ${stateDir} 0700 root root -" ];
       systemd.services.amp-orbs-secrets = {
