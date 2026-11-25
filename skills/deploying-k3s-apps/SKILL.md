@@ -207,9 +207,8 @@ spec:
   `strategy: {type: Recreate}` on the Deployment. For a database, use SQLite with Litestream
   (below), not a database server.
 - Apps reach each other by Service name, and the internet, but not the LAN or the rest of the
-  cluster. That includes the Kubernetes API, and you cannot create ServiceAccounts or Roles, so
-  an app that shows cluster state gets it from you: write it with kubectl into a ConfigMap the
-  app mounts, and tell the user it is a snapshot.
+  cluster. An app that shows what runs in `apps` reads the Kubernetes API itself (see Reading
+  the cluster from an app).
 
 ## SQLite with Litestream
 
@@ -286,6 +285,42 @@ before going on. `kubectl logs deploy/$APP -c replicate` shows the replica synci
 /data/app.db` lists what is backed up. To test a restore without touching the live database, run
 `litestream restore -config /etc/litestream/litestream.yml -o /tmp/check.db /data/app.db` in that
 container and query `/tmp/check.db`.
+
+## Reading the cluster from an app
+
+An app that shows what runs in `apps`, such as a dashboard of apps, reads it live from the
+Kubernetes API with a ServiceAccount of its own. The cluster lets that ServiceAccount only get,
+list and watch in `apps`, never Secrets, exec or anything that writes; if the app needs more,
+tell the user it takes a platform change. Grant only the resources the app shows. Add to
+`deploy/k8s.yaml`:
+
+```yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata: {name: __APP__}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: {name: __APP__}
+rules:
+- {apiGroups: [apps], resources: [deployments], verbs: [get, list, watch]}
+- {apiGroups: [""], resources: [services], verbs: [get, list, watch]}
+- {apiGroups: [networking.k8s.io], resources: [ingresses], verbs: [get, list, watch]}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: __APP__}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: __APP__}
+subjects: [{kind: ServiceAccount, name: __APP__}]
+```
+
+In the Deployment, set `serviceAccountName: __APP__` in the pod spec and add the label
+`kube-api: allow` to the pod template's labels: only pods with it reach the API. The app calls
+`https://$KUBERNETES_SERVICE_HOST:$KUBERNETES_SERVICE_PORT/apis/apps/v1/namespaces/apps/deployments`
+and so on, with the CA certificate and token in `/var/run/secrets/kubernetes.io/serviceaccount/`.
+The token is renewed while the pod runs, so read the file again for each request. A new pod's
+NetworkPolicy takes a few seconds to apply, so retry the first calls. Polling every 10 seconds
+is enough for a dashboard.
 
 ## Deploy
 

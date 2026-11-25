@@ -18,9 +18,11 @@ let
         endpoint: ["http://10.43.0.50:8080"]
   '';
 
-  # The apps platform's manifests name apps.example.com where the apps' domain goes.
+  # The apps platform's manifests name apps.example.com where the apps' domain goes, and
+  # 192.0.2.1 where the server's address goes.
   platform = file: pkgs.writeText (baseNameOf file)
-    (builtins.replaceStrings [ "apps.example.com" ] [ cfg.appsDomain ] (builtins.readFile file));
+    (builtins.replaceStrings [ "apps.example.com" "192.0.2.1" ] [ cfg.appsDomain cfg.nodeIP ]
+      (builtins.readFile file));
   # Each becomes the K3s manifest amp-apps-<name>.yaml. The names stay fixed: tmpfiles never
   # removes the link of a manifest that is renamed or dropped (ExecStartPre below does).
   # coredns-custom.yaml is applied by amp-orbs-secrets instead, which restarts CoreDNS after it.

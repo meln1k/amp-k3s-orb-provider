@@ -299,7 +299,12 @@ builds an app's image in the cluster, deploys it, and you open it at
   no host access). They accept connections only from Traefik and each other, and reach only each
   other, the cluster's DNS and the internet: not the LAN, the NAS, the nodes or other namespaces.
   Admission refuses LoadBalancer and NodePort Services, `externalIPs` and Tailscale annotations
-  there, so every app goes through Traefik.
+  there, so every app goes through Traefik. Pods labelled `kube-api: allow` also reach the K3s
+  API, so an app can show the cluster's state with a ServiceAccount an agent creates for it.
+  The policy `app-api-access` keeps that ServiceAccount's Role to get, list and watch in `apps`,
+  without Secrets, exec or other subresources than `pods/log`, binds it to ServiceAccounts in
+  `apps` only (not `default`), keeps agents off the Role `agent` and the users' RoleBindings to
+  it, and refuses ServiceAccount token Secrets, so an app's token lives only as long as its pod.
 - **Agent access** ([`amp-auth.yaml`](../platform/amp-auth.yaml)): orbs sign in to the K3s API with
   Amp's workload identity, a 10-minute token `amp orb id-token` mints for each command, so no
   credential is stored anywhere. The API sees the thread's creator as `amp:<Amp user ID>`, and a
