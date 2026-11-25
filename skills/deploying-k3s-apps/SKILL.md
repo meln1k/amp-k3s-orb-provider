@@ -24,20 +24,9 @@ The kubeconfig's namespace is `apps`, so the commands in this skill omit `-n`.
 mkdir -p ~/.kube ~/.config/nix
 # No credential in it: kubectl gets a fresh token from `amp orb id-token` per command.
 (umask 077; printf '%s' "$APPS_KUBECONFIG" > ~/.kube/config)
-# Kubernetes supports a client within one minor version of the server. New orbs install the
-# server's kubectl as they start, but an older orb's may be missing or newer: ask the API for its
-# minor, and install that one if needed.
-jq -r '.clusters[0].cluster["certificate-authority-data"]' <<<"$APPS_KUBECONFIG" | base64 -d > /tmp/k3s-ca.crt
-S=$(printf 'Authorization: Bearer %s\n' "$(amp orb id-token --audience k3s-apps)" |
-  curl -fsS --cacert /tmp/k3s-ca.crt -H @- https://kubernetes.default.svc.cluster.local/version |
-  jq -r .minor | tr -dc 0-9)
-if [ -z "$S" ]; then echo 'cannot read the API version; check `amp orb id-token`' >&2
-else
-  C=$(kubectl version --client -o json 2>/dev/null | jq -r .clientVersion.minor | tr -dc 0-9)
-  [ -n "$C" ] && [ $((C - S)) -le 1 ] && [ $((S - C)) -le 1 ] || {
-    curl -fsSLo /tmp/kubectl "https://dl.k8s.io/release/$(curl -fsSL https://dl.k8s.io/release/stable-1.$S.txt)/bin/linux/amd64/kubectl" &&
-      sudo install /tmp/kubectl "$(command -v kubectl || echo /usr/local/bin/kubectl)"; }
-fi
+# The orb installs the cluster's kubectl as it starts; wait for it if the orb is seconds old.
+for i in $(seq 30); do [ -x /usr/local/bin/kubectl ] && break; sleep 2; done
+[ -x /usr/local/bin/kubectl ] || cat /var/log/kubectl-install.log
 command -v nix >/dev/null || {
   curl -fsSL https://nixos.org/nix/install | sh -s -- --no-daemon
   . ~/.nix-profile/etc/profile.d/nix.sh; }

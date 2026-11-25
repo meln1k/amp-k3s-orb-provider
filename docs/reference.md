@@ -41,7 +41,7 @@ container mounts the result from the server's Nix store. The root-only
 - kubectl: the same wrapper also installs, in the background, the kubectl of the K3s package's
   Kubernetes version from `dl.k8s.io`, checked against its published SHA-256, so agents deploying
   apps find a matching kubectl in `/usr/local/bin`. It logs to `/var/log/kubectl-install.log` in
-  the orb; orbs created before this change do not have it, and the skill installs one there.
+  the orb.
 
 With K3s's own pods, the control plane requests about 1.6 CPU and 2.4 GiB of memory, and 5 GiB
 of disk plus the snapshot store instead of 500 GiB.
