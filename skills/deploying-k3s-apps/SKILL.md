@@ -200,7 +200,8 @@ the app, which mounts `data` at `/data` too):
       # Restores the last backup when the volume has no database yet.
       - name: restore
         image: &litestream litestream/litestream:0.5.18@sha256:513bff62a88fc0c86c73d27333c41c54c89fe890a7c32a551600adff9309b11b
-        args: [restore, -config, /etc/litestream/litestream.yml, -if-db-not-exists, -if-replica-exists, /data/app.db]
+        # A new pod's NetworkPolicy takes a few seconds to apply, so retry for up to a minute.
+        command: [sh, -c, 'for i in $(seq 30); do litestream restore -config /etc/litestream/litestream.yml -if-db-not-exists -if-replica-exists /data/app.db && exit 0; sleep 2; done; exit 1']
         envFrom: [{secretRef: {name: litestream}}]
         volumeMounts: &lsmounts
         - {name: data, mountPath: /data}
