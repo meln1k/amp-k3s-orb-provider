@@ -24,21 +24,24 @@ The kubeconfig's namespace is `apps`, so the commands in this skill omit `-n`.
 mkdir -p ~/.kube ~/.config/nix
 # No credential in it: kubectl gets a fresh token from `amp orb id-token` per command.
 (umask 077; printf '%s' "$APPS_KUBECONFIG" > ~/.kube/config)
-# kubectl_install <stable or stable-1.N>: over the kubectl on PATH, or into /usr/local/bin.
-kubectl_install() {
-  curl -fsSLo /tmp/kubectl "https://dl.k8s.io/release/$(curl -fsSL https://dl.k8s.io/release/$1.txt)/bin/linux/amd64/kubectl" &&
-    sudo install /tmp/kubectl "$(command -v kubectl || echo /usr/local/bin/kubectl)"; }
-command -v kubectl >/dev/null || kubectl_install stable
+# Kubernetes supports a client within one minor version of the server, and the orb's own kubectl
+# may be missing or newer: ask the API for its minor, and install that one if needed.
+jq -r '.clusters[0].cluster["certificate-authority-data"]' <<<"$APPS_KUBECONFIG" | base64 -d > /tmp/k3s-ca.crt
+S=$(printf 'Authorization: Bearer %s\n' "$(amp orb id-token --audience k3s-apps)" |
+  curl -fsS --cacert /tmp/k3s-ca.crt -H @- https://kubernetes.default.svc.cluster.local/version |
+  jq -r .minor | tr -dc 0-9)
+if [ -z "$S" ]; then echo 'cannot read the API version; check `amp orb id-token`' >&2
+else
+  C=$(kubectl version --client -o json 2>/dev/null | jq -r .clientVersion.minor | tr -dc 0-9)
+  [ -n "$C" ] && [ $((C - S)) -le 1 ] && [ $((S - C)) -le 1 ] || {
+    curl -fsSLo /tmp/kubectl "https://dl.k8s.io/release/$(curl -fsSL https://dl.k8s.io/release/stable-1.$S.txt)/bin/linux/amd64/kubectl" &&
+      sudo install /tmp/kubectl "$(command -v kubectl || echo /usr/local/bin/kubectl)"; }
+fi
 command -v nix >/dev/null || {
   curl -fsSL https://nixos.org/nix/install | sh -s -- --no-daemon
   . ~/.nix-profile/etc/profile.d/nix.sh; }
 # gVisor cannot run Nix's build sandbox.
 printf 'experimental-features = nix-command flakes\nsandbox = false\n' > ~/.config/nix/nix.conf
-# Kubernetes supports a client within one minor version of the server; the orb's own kubectl
-# may be newer, so install the server's minor if not.
-V=$(kubectl version -o json) && S=$(jq -r .serverVersion.minor <<<"$V" | tr -dc 0-9) &&
-  C=$(jq -r .clientVersion.minor <<<"$V" | tr -dc 0-9) &&
-  { [ $((C - S)) -le 1 ] && [ $((S - C)) -le 1 ] || kubectl_install stable-1.$S; }
 kubectl version   # no skew warning
 kubectl auth whoami                   # amp:<your Amp user ID>
 kubectl auth can-i create deployments # yes; "no" means the user has no RoleBinding in apps
@@ -170,7 +173,9 @@ REF=registry.registry.svc:8080/$APP@$(cat /tmp/$APP-digest)   # the image Build 
 sed -e "s#__APP__#$APP#g" -e "s#__IMAGE__#$REF#" -e "s#__HOST__#$APP.$APPS_DOMAIN#" deploy/k8s.yaml | kubectl apply -f -
 kubectl annotate deploy/$APP kubernetes.io/change-cause="$IMAGE" --overwrite
 kubectl rollout status deploy/$APP --timeout=3m
-curl -fsS "https://$APP.$APPS_DOMAIN/healthz"
+# Traefik routes to a new pod or Ingress a few seconds after the rollout finishes; until then it
+# answers 503 or 404, so retry for up to about 30 seconds.
+curl -fsS --retry 15 --retry-delay 2 --retry-all-errors "https://$APP.$APPS_DOMAIN/healthz"
 # Pods of the previous version may still be terminating, so only the others count.
 test "$(kubectl get pod -l app=$APP -o go-template='{{range .items}}{{if not .metadata.deletionTimestamp}}{{(index .status.containerStatuses 0).imageID}}{{"\n"}}{{end}}{{end}}' | sort -u)" = \
   "$REF" && echo 'digest ok'
