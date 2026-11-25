@@ -34,6 +34,53 @@ spec:
   template:
     metadata: {labels: {app: registry}}
     spec:
+      initContainers:
+      # Prunes old images while the registry is stopped, so no push races the garbage collection.
+      # It runs only when the CronJob below has just asked for it; any other start, such as after
+      # a reboot, skips it. Per repository it keeps the 5 newest tags (by push time) and every image
+      # the apps and tasks namespaces still name, including rollback history, re-tagging an
+      # in-use image keep-<digest> if its own tag moved on. A failure only logs, so the registry
+      # always starts.
+      - name: prune
+        image: registry:3.1.2@sha256:82f6ff4a7f982960c8aa51617fea3aabc485df6e55cce80d22deb1de36f1bc3c
+        command:
+        - sh
+        - -c
+        - |
+          req=$(cat /prune/requested 2>/dev/null || echo 0)
+          if [ $(( $(date +%s) - req )) -gt 1800 ]; then echo 'no prune requested'; exit 0; fi
+          root=/var/lib/registry/docker/registry/v2/repositories
+          inuse() { grep -qxF "registry.registry.svc:8080/$1" /prune/in-use; }
+          for m in $(find "$root" -type d -name _manifests 2>/dev/null); do
+            repo=${m#$root/}; repo=${repo%/_manifests}; tags=$m/tags
+            mkdir -p "$tags"
+            rm -rf "$tags"/keep-*
+            n=0
+            for t in $(for t in $(ls "$tags"); do
+                echo "$(stat -c %Y "$tags/$t/current/link" 2>/dev/null || echo 0) $t"; done |
+                sort -rn | cut -d' ' -f2); do
+              d=$(cat "$tags/$t/current/link" 2>/dev/null)
+              if [ $n -lt 5 ] || inuse "$repo:$t" || inuse "$repo@$d"; then n=$((n + 1))
+              else echo "untag $repo:$t ($d)"; rm -rf "${tags:?}/$t"; fi
+            done
+            for d in $(sed -n "s#^registry\.registry\.svc:8080/$repo@sha256:##p" /prune/in-use); do
+              [ -d "$m/revisions/sha256/$d" ] || continue
+              grep -rqxF "sha256:$d" "$tags" 2>/dev/null && continue
+              k=$tags/keep-$(echo "$d" | cut -c1-12)
+              mkdir -p "$k/current" "$k/index/sha256/$d"
+              printf 'sha256:%s' "$d" > "$k/current/link"
+              printf 'sha256:%s' "$d" > "$k/index/sha256/$d/link"
+            done
+          done
+          registry garbage-collect --delete-untagged /etc/distribution/config.yml ||
+            echo 'garbage-collect failed'
+          exit 0
+        resources:
+          requests: {cpu: 10m, memory: 32Mi}
+          limits: {memory: 256Mi}
+        volumeMounts:
+        - {name: data, mountPath: /var/lib/registry}
+        - {name: prune, mountPath: /prune, readOnly: true}
       containers:
       - name: registry
         image: registry:3.1.2
@@ -47,7 +94,9 @@ spec:
           limits: {memory: 256Mi}
         readinessProbe: {httpGet: {path: /v2/, port: http}}
         volumeMounts: [{name: data, mountPath: /var/lib/registry}]
-      volumes: [{name: data, persistentVolumeClaim: {claimName: registry}}]
+      volumes:
+      - {name: data, persistentVolumeClaim: {claimName: registry}}
+      - {name: prune, configMap: {name: registry-prune, optional: true}}
 ---
 apiVersion: v1
 kind: Service
@@ -61,3 +110,115 @@ spec:
   clusterIP: 10.43.0.50
   selector: {app: registry}
   ports: [{name: http, port: 8080, targetPort: http}]
+---
+# Weekly cleanup of old images (the registry's init container above does the work). This records
+# every image the apps and tasks namespaces still name, then restarts the registry; it is down for
+# the minute or so the garbage collection takes, and nodes pulling then retry.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: registry-prune
+  namespace: registry
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: registry-prune
+  namespace: registry
+rules:
+- apiGroups: [""]
+  resources: [configmaps]
+  resourceNames: [registry-prune]
+  verbs: [get, update, patch]
+- apiGroups: [""]
+  resources: [configmaps]
+  verbs: [create]
+- apiGroups: [apps]
+  resources: [deployments]
+  resourceNames: [registry]
+  verbs: [get, patch, watch]
+- apiGroups: [apps]
+  resources: [replicasets]
+  verbs: [get, list, watch]
+- apiGroups: [""]
+  resources: [pods]
+  verbs: [get, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: registry-prune
+  namespace: registry
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: registry-prune}
+subjects: [{kind: ServiceAccount, name: registry-prune, namespace: registry}]
+---
+# Reads which images the apps and tasks namespaces use, in each of them.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: registry-prune-read
+rules:
+- apiGroups: [""]
+  resources: [pods]
+  verbs: [list]
+- apiGroups: [apps]
+  resources: [deployments, replicasets, statefulsets]
+  verbs: [list]
+- apiGroups: [batch]
+  resources: [jobs, cronjobs]
+  verbs: [list]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: registry-prune
+  namespace: apps
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: registry-prune-read}
+subjects: [{kind: ServiceAccount, name: registry-prune, namespace: registry}]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: registry-prune
+  namespace: tasks
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: registry-prune-read}
+subjects: [{kind: ServiceAccount, name: registry-prune, namespace: registry}]
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: registry-prune
+  namespace: registry
+spec:
+  schedule: "0 3 * * 0"
+  timeZone: Etc/UTC
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 1
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      activeDeadlineSeconds: 3600
+      template:
+        spec:
+          serviceAccountName: registry-prune
+          restartPolicy: Never
+          containers:
+          - name: prune
+            image: alpine/kubectl:1.35.0@sha256:862d86046bbcad03c252bbc10ab8bf893e7aa50aa7a20de8bfc46727dd645883
+            command:
+            - sh
+            - -ec
+            - |
+              # Fails, and leaves the registry alone, if any namespace cannot be read.
+              for ns in apps tasks; do
+                kubectl -n "$ns" get pods,deployments,replicasets,statefulsets,jobs,cronjobs -o yaml
+              done | grep -o 'registry\.registry\.svc:8080/[^"[:space:]]*' | sort -u > /tmp/in-use
+              echo "$(wc -l < /tmp/in-use) images in use"
+              kubectl -n registry create configmap registry-prune --from-literal=requested="$(date +%s)" \
+                --from-file=in-use=/tmp/in-use --dry-run=client -o yaml | kubectl apply -f -
+              kubectl -n registry rollout restart deploy/registry
+              kubectl -n registry rollout status deploy/registry --timeout=30m
+            resources:
+              requests: {cpu: 10m, memory: 32Mi}
+              limits: {memory: 128Mi}

@@ -171,6 +171,8 @@ deploy upgrades.
    kubectl -n apps create rolebinding amp-<Amp username> --role=agent --user=amp:<Amp user ID>
    # Compute tasks on the burst machines (docs/reference.md, Tasks).
    kubectl -n tasks create rolebinding amp-<Amp username> --role=agent --user=amp:<Amp user ID>
+   # Read-only view of the machines (kubectl get nodes, kubectl top node).
+   kubectl create clusterrolebinding amp-<Amp username>-nodes --clusterrole=amp-agent-nodes --user=amp:<Amp user ID>
    ```
 
 3. **Environment.** Store the output of `platform/agent-kubeconfig.sh` (run it on the server from

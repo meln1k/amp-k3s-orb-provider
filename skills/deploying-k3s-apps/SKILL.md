@@ -145,7 +145,10 @@ spec:
   `readinessProbe` at another path if the app serves that instead.
 - Give every container requests and a memory limit of at least the request. Without them it gets
   50m and 128Mi; a memory request over 128Mi without a limit is refused, and so is a pod over the
-  shared quota (`kubectl describe quota apps`).
+  shared quota (`kubectl describe quota apps`). `kubectl top node` shows how much room each
+  machine has left.
+- The registry keeps each app's 5 newest tags plus every image a Deployment or its rollback
+  history still names; older ones are pruned weekly.
 - The Ingress needs no `tls` section: Traefik serves the wildcard certificate, which covers
   `<app>.$APPS_DOMAIN` but not `a.<app>.$APPS_DOMAIN`, and redirects HTTP to HTTPS.
 - State that must survive a restart goes in a PersistentVolumeClaim, with

@@ -304,7 +304,8 @@ builds an app's image in the cluster, deploys it, and you open it at
   Amp's workload identity, a 10-minute token `amp orb id-token` mints for each command, so no
   credential is stored anywhere. The API sees the thread's creator as `amp:<Amp user ID>`, and a
   RoleBinding per user gives the Role `agent` in `apps`, and one in `tasks` (see [Tasks](#tasks)):
-  nothing in `amp-orbs`, `ate-system` or the nodes.
+  nothing in `amp-orbs` or `ate-system`. A ClusterRoleBinding to `amp-agent-nodes` adds a
+  read-only view of the nodes and their usage, so agents see how much room is left.
 - **Images** ([`registry.yaml`](../platform/registry.yaml)): an in-cluster registry. Docker inside
   a gVisor orb cannot build, so agents build each app's image with Nix in their orb
   (`dockerTools`, from the app's `flake.nix`) and push it with `skopeo` over plain HTTP. Apps need
@@ -370,9 +371,13 @@ server. A burst machine's shutdown gives its tasks up to 9.5 minutes to stop (th
 atelet's 330 s); a Job then runs that pod again on another burst machine, from the start, once
 one is up. Not tested yet on a burst machine.
 
-The registry keeps every image pushed. To free its disk, delete old tags and run, while nobody
-pushes, `kubectl -n registry exec deploy/registry -- registry garbage-collect --delete-untagged
-/etc/distribution/config.yml`.
+The registry prunes itself every Sunday at 03:00 UTC. The CronJob `registry-prune` records every
+image the `apps` and `tasks` namespaces still name (pods, Deployments with their rollback
+history, Jobs and the like), then restarts the registry. Before it serves again, its init
+container keeps the 5 most recently pushed tags of each repository plus every image still
+named, and runs the registry's garbage collection, so no push can race it. The registry is
+down for that minute or so. To prune now: `kubectl -n registry create job --from=cronjob/registry-prune
+prune-now`; `kubectl -n registry logs deploy/registry -c prune` shows what it removed.
 
 ### kubectl over Tailscale
 

@@ -113,6 +113,16 @@ rules:
 - apiGroups: [apps]
   resources: [replicasets, controllerrevisions]
   verbs: [get, list, watch]
+# Read-only, so `kubectl get all`, which lists these too, works.
+- apiGroups: [""]
+  resources: [replicationcontrollers]
+  verbs: [get, list, watch]
+- apiGroups: [apps]
+  resources: [daemonsets]
+  verbs: [get, list, watch]
+- apiGroups: [autoscaling]
+  resources: [horizontalpodautoscalers]
+  verbs: [get, list, watch]
 - apiGroups: [batch]
   resources: [jobs, cronjobs]
   verbs: [get, list, watch, create, update, patch, delete, deletecollection]
@@ -127,6 +137,21 @@ rules:
   verbs: [get, list, watch]
 - apiGroups: [metrics.k8s.io]
   resources: [pods]
+  verbs: [get, list]
+---
+# Lets agents see the machines and how full they are (`kubectl get nodes`, `kubectl top node`)
+# before they size an app or a task. Read-only, and nodes only; a ClusterRoleBinding per user
+# grants it, next to their RoleBindings (README, step 5).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: amp-agent-nodes
+rules:
+- apiGroups: [""]
+  resources: [nodes]
+  verbs: [get, list, watch]
+- apiGroups: [metrics.k8s.io]
+  resources: [nodes]
   verbs: [get, list]
 ---
 # Keeps every app behind Traefik:
