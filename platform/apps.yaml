@@ -1,8 +1,9 @@
 # The namespace for long-running apps, and the Role agents deploy them with. Amp users' orbs get
 # it through a RoleBinding per user (docs/reference.md, Apps platform). It gives nothing outside this
 # namespace: no access to amp-orbs, ate-system or the nodes. Agents may give an app's
-# ServiceAccount a Role of their own, but the policy app-api-access (below) keeps it read-only,
-# without Secrets, and its token lives only as long as the pod.
+# ServiceAccount a read-only Role (the policies app-roles and app-rolebindings below). Its token
+# lives as long as the pod, which can outlive the user's RoleBinding: when you remove a user,
+# remove their apps' ServiceAccounts and RoleBindings too (docs/reference.md, Apps platform).
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -103,8 +104,9 @@ spec:
         except: [10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10, 169.254.0.0/16]
 ---
 # Pods labelled kube-api=allow also reach the K3s API, for apps that show the cluster's state
-# with their ServiceAccount. NetworkPolicies see a connection to the Service kubernetes after
-# kube-proxy sends it to the server's address, which the module puts in place of 192.0.2.1.
+# with their ServiceAccount. kube-router checks a connection to the Service kubernetes
+# (10.43.0.1:443) after kube-proxy sends it to the server's address, which the module puts in
+# place of 192.0.2.1/32, so only that address needs a rule.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -119,10 +121,6 @@ spec:
     - ipBlock: {cidr: 192.0.2.1/32}
     ports:
     - {port: 6443, protocol: TCP}
-  - to:
-    - ipBlock: {cidr: 10.43.0.1/32}
-    ports:
-    - {port: 443, protocol: TCP}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
@@ -164,8 +162,8 @@ rules:
 - apiGroups: [networking.k8s.io]
   resources: [networkpolicies]
   verbs: [get, list, watch]
-# An app's own API access. The API lets a user grant only rights they hold, and the policy
-# app-api-access narrows that further.
+# An app's own API access. The API lets a user grant only rights they hold, and the policies
+# app-roles and app-rolebindings narrow that further.
 - apiGroups: [""]
   resources: [serviceaccounts]
   verbs: [get, list, watch, create, update, patch, delete]
@@ -240,14 +238,18 @@ spec:
     namespaceSelector:
       matchLabels: {kubernetes.io/metadata.name: apps}
 ---
-# What agents may give an app's ServiceAccount: a Role that only reads, never Secrets, exec,
-# attach, port-forward or proxies (a Role that creates pods could read Secrets through them),
-# bound to ServiceAccounts in apps other than default. Agents cannot touch the Role agent or the
-# users' RoleBindings to it, and cannot mint a lasting ServiceAccount token in a Secret.
+# The policies below check what agents (amp: users) create, change and delete by its shape, not
+# its name, so every Role and RoleBinding of the platform's own, such as the Role agent, the users'
+# RoleBindings to it and registry-prune, is out of their reach. One policy per resource, so each
+# expression type-checks against one kind.
+#
+# An app's Role only reads: get, list and watch, never Secrets, `*` or a subresource other than
+# pods/log (exec, attach, port-forward, proxies). A Role that created pods could read Secrets
+# through them.
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
 metadata:
-  name: app-api-access
+  name: app-roles
 spec:
   failurePolicy: Fail
   matchConstraints:
@@ -255,7 +257,88 @@ spec:
     - apiGroups: [rbac.authorization.k8s.io]
       apiVersions: [v1]
       operations: [CREATE, UPDATE, DELETE]
-      resources: [roles, rolebindings]
+      resources: [roles]
+  matchConditions:
+  - name: agents
+    expression: request.userInfo.username.startsWith('amp:')
+  variables:
+  # The Role before and after the request: both must be an app's.
+  - name: sides
+    expression: >-
+      request.operation == 'CREATE' ? [object] :
+      request.operation == 'DELETE' ? [oldObject] : [object, oldObject]
+  validations:
+  - expression: >-
+      variables.sides.all(o, !has(o.rules) || o.rules.all(r,
+        r.verbs.all(v, v in ['get', 'list', 'watch']) &&
+        (!has(r.resources) || r.resources.all(x,
+          x != '*' && x != 'secrets' && (!x.contains('/') || x == 'pods/log')))))
+    message: >-
+      An app's Role may only get, list and watch, and not Secrets or subresources other than
+      pods/log. Roles that do more belong to the platform.
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: app-roles
+spec:
+  policyName: app-roles
+  validationActions: [Deny]
+  matchResources:
+    namespaceSelector:
+      matchLabels: {kubernetes.io/metadata.name: apps}
+---
+# An app's RoleBinding binds a Role (never agent, never a ClusterRole) to ServiceAccounts in apps
+# other than default, never to users or groups.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: app-rolebindings
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+    - apiGroups: [rbac.authorization.k8s.io]
+      apiVersions: [v1]
+      operations: [CREATE, UPDATE, DELETE]
+      resources: [rolebindings]
+  matchConditions:
+  - name: agents
+    expression: request.userInfo.username.startsWith('amp:')
+  variables:
+  - name: sides
+    expression: >-
+      request.operation == 'CREATE' ? [object] :
+      request.operation == 'DELETE' ? [oldObject] : [object, oldObject]
+  validations:
+  - expression: >-
+      variables.sides.all(o, o.roleRef.kind == 'Role' && o.roleRef.name != 'agent' &&
+        has(o.subjects) && o.subjects.all(s, s.kind == 'ServiceAccount' && s.name != 'default' &&
+          (!has(s.namespace) || s.namespace == 'apps')))
+    message: >-
+      An app's RoleBinding binds a Role other than agent to ServiceAccounts in apps, other than
+      default. Other RoleBindings belong to the platform.
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: app-rolebindings
+spec:
+  policyName: app-rolebindings
+  validationActions: [Deny]
+  matchResources:
+    namespaceSelector:
+      matchLabels: {kubernetes.io/metadata.name: apps}
+---
+# No lasting ServiceAccount token in a Secret: pods get short-lived ones.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: app-token-secrets
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
     - apiGroups: [""]
       apiVersions: [v1]
       operations: [CREATE, UPDATE]
@@ -264,40 +347,15 @@ spec:
   - name: agents
     expression: request.userInfo.username.startsWith('amp:')
   validations:
-  - expression: request.resource.resource != 'roles' || request.name != 'agent'
-    message: The Role agent belongs to the platform.
-  - expression: >-
-      request.resource.resource != 'roles' || request.operation == 'DELETE' ||
-      !has(object.rules) || object.rules.all(r,
-        r.verbs.all(v, v in ['get', 'list', 'watch']) &&
-        (!has(r.resources) || r.resources.all(x,
-          x != '*' && x != 'secrets' && (!x.contains('/') || x == 'pods/log'))))
-    message: >-
-      An app's Role may only get, list and watch, and not Secrets or subresources other than
-      pods/log.
-  - expression: >-
-      request.resource.resource != 'rolebindings' || request.operation == 'CREATE' ||
-      oldObject.roleRef.name != 'agent'
-    message: RoleBindings to the Role agent belong to the platform.
-  - expression: >-
-      request.resource.resource != 'rolebindings' || request.operation == 'DELETE' ||
-      (object.roleRef.kind == 'Role' && object.roleRef.name != 'agent' && has(object.subjects) &&
-       object.subjects.all(s, s.kind == 'ServiceAccount' && s.name != 'default' &&
-         (!has(s.namespace) || s.namespace == 'apps')))
-    message: >-
-      A RoleBinding here binds a Role other than agent to ServiceAccounts in apps, other than
-      default.
-  - expression: >-
-      request.resource.resource != 'secrets' || !has(object.type) ||
-      object.type != 'kubernetes.io/service-account-token'
+  - expression: "!has(object.type) || object.type != 'kubernetes.io/service-account-token'"
     message: ServiceAccount token Secrets are not allowed; pods get short-lived tokens.
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding
 metadata:
-  name: app-api-access
+  name: app-token-secrets
 spec:
-  policyName: app-api-access
+  policyName: app-token-secrets
   validationActions: [Deny]
   matchResources:
     namespaceSelector:

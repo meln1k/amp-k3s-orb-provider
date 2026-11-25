@@ -301,10 +301,14 @@ builds an app's image in the cluster, deploys it, and you open it at
   Admission refuses LoadBalancer and NodePort Services, `externalIPs` and Tailscale annotations
   there, so every app goes through Traefik. Pods labelled `kube-api: allow` also reach the K3s
   API, so an app can show the cluster's state with a ServiceAccount an agent creates for it.
-  The policy `app-api-access` keeps that ServiceAccount's Role to get, list and watch in `apps`,
-  without Secrets, exec or other subresources than `pods/log`, binds it to ServiceAccounts in
-  `apps` only (not `default`), keeps agents off the Role `agent` and the users' RoleBindings to
-  it, and refuses ServiceAccount token Secrets, so an app's token lives only as long as its pod.
+  Admission policies check what agents create, change and delete by its shape: a Role that only
+  gets, lists and watches, without Secrets, exec or other subresources than `pods/log`
+  (`app-roles`), bound to ServiceAccounts in `apps` other than `default` (`app-rolebindings`),
+  and no ServiceAccount token Secrets (`app-token-secrets`). The platform's own Roles and
+  RoleBindings, such as `agent` and the users' bindings to it, do not have that shape, so agents
+  cannot change or delete them. The policies cover `amp:` users only. An app's token lives as
+  long as its pod, which can outlive its user's RoleBinding: when you remove a user, also delete
+  the ServiceAccounts and RoleBindings of their apps (`kubectl -n apps get rolebindings -o wide`).
 - **Agent access** ([`amp-auth.yaml`](../platform/amp-auth.yaml)): orbs sign in to the K3s API with
   Amp's workload identity, a 10-minute token `amp orb id-token` mints for each command, so no
   credential is stored anywhere. The API sees the thread's creator as `amp:<Amp user ID>`, and a
@@ -421,8 +425,9 @@ yourself access in the tailnet policy. This maps tailnet admins to cluster admin
 ```
 
 Then `tailscale configure kubeconfig k3s-operator` on your machine. For narrower access,
-impersonate a group of your own and bind it with a RoleBinding, such as `edit` in `apps`. Not
-tested yet.
+impersonate a group of your own and bind it with a RoleBinding, such as `edit` in `apps`. The
+admission policies for agents' Roles and RoleBindings do not apply to such a group. Not tested
+yet.
 
 ## Troubleshoot
 

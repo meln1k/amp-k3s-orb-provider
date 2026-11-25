@@ -19,9 +19,9 @@ let
   '';
 
   # The apps platform's manifests name apps.example.com where the apps' domain goes, and
-  # 192.0.2.1 where the server's address goes.
+  # 192.0.2.1/32 where the server's address goes.
   platform = file: pkgs.writeText (baseNameOf file)
-    (builtins.replaceStrings [ "apps.example.com" "192.0.2.1" ] [ cfg.appsDomain cfg.nodeIP ]
+    (builtins.replaceStrings [ "apps.example.com" "192.0.2.1/32" ] [ cfg.appsDomain "${cfg.nodeIP}/32" ]
       (builtins.readFile file));
   # Each becomes the K3s manifest amp-apps-<name>.yaml. The names stay fixed: tmpfiles never
   # removes the link of a manifest that is renamed or dropped (ExecStartPre below does).
