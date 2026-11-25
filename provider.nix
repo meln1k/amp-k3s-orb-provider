@@ -2,7 +2,7 @@
 # replaces six exact strings in its bundled main.js and fails unless each occurs exactly once.
 # orbs.nix mounts the result over the original in the provider container. What each patch is for:
 # docs/reference.md, "Memory snapshots", "Sizing" and "Running out of memory".
-{ lib, pkgs, image, fail, kubernetesVersion }:
+{ lib, pkgs, image, fail, kubernetesVersion, appsDomain }:
 let
   # main.js from the provider image the chart names, pinned by hash: a new chart's provider
   # fails here first, with the hash to put below once the patches are checked against it. The
@@ -25,7 +25,27 @@ let
   # and restart earlyoom if it exits. A woken orb keeps both running from its memory snapshot.
   # It also installs the kubectl of the cluster's Kubernetes version (deploying-k3s-apps), checked
   # against the checksum published next to it, retrying until the download works.
+  # SSH to github.com goes through Traefik wrapped in TLS (platform/traefik.yaml), since the
+  # egress gateway refuses SSH. GitHub's host keys (api.github.com/meta) go in the user's
+  # known_hosts as well as the global one, so a setup script that runs ssh-keyscan only for an
+  # unknown github.com, which cannot connect through the gateway, skips it.
+  sshHost = "github-ssh.${appsDomain}";
+  githubHostKeys = ''
+    github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl
+    github.com ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBEmKSENjQEezOmxkZMy7opKgwFB9nkt5YRrYMjNuG5N87uRgg6CLrbo5wAdT/y6v0mKV0U2w0WZ2YB/++Tpockg=
+    github.com ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQCj7ndNxQowgcQnjshcLrqPEiiphnt+VTTvDP6mHBL9j1aNUkY4Ue1gvwnGLVlOhGeYrnZaMgRK6+PKCUXaDbC7qtbW8gIkhL7aGCsOr/C56SJMy/BCZfxd1nWzAOxSDPgVsmerOBYfNqltV9/hWCqBywINIR+5dIg6JTJ72pcEpEjcYgXkE2YEFXV1JHnsKgbLWNlhScqb2UmyRkQyytRLtL+38TGxkxCflmO+5Z8CSSNY7GidjMIZ7Q4zMjA2n1nGrlTDkzwDCsw+wqFPGQA179cnfGWOWRVruj16z6XyvxvjJwbz0wQZ75XK5tKSb7FNyeIEs4TT4jk+S4dhPeAUC5y+bDYirYgM4GC7uEnztnZyaVWQ7B381AK4Qdrwt51ZqExKbQpTUNn+EjqoTwvqNj4kqx5QUCI0ThS/YkOxJCXmPUWZbhjpCg56i+2aB6CmK2JGhn57K5mj0MNdBXA4/WnwH6XoPWJzK5Nyu2zB3nAZp+S5hpQs+p1vN1/wsjk=
+  '';
+  sshConfig = ''
+    Host github.com
+      ProxyCommand openssl s_client -quiet -verify_return_error -verify_hostname ${sshHost} -connect ${sshHost}:443 -servername ${sshHost}
+  '';
   start = ''
+    mkdir -p /etc/ssh/ssh_config.d
+    printf '%s' ${lib.escapeShellArg sshConfig} > /etc/ssh/ssh_config.d/github.conf
+    printf '%s' ${lib.escapeShellArg githubHostKeys} >> /etc/ssh/ssh_known_hosts
+    install -d -m 700 -o user -g user /home/user/.ssh &&
+      printf '%s' ${lib.escapeShellArg githubHostKeys} >> /home/user/.ssh/known_hosts &&
+      chown user:user /home/user/.ssh/known_hosts && chmod 600 /home/user/.ssh/known_hosts
     (
       u=https://dl.k8s.io/release/v${lib.head (lib.splitString "+" kubernetesVersion)}/bin/linux/amd64/kubectl
       until /usr/local/bin/kubectl version --client >/dev/null 2>&1; do
@@ -57,7 +77,7 @@ let
     # Worker pods request the orb's whole CPU, its limit, instead of 1 CPU: compilers and browsers
     # keep orbs busy, and a node that admits more orb CPU than it has slows every orb down.
     [ ''requests:{cpu:"1",memory:e}'' ''requests:{cpu:String(i.cpu),memory:e}'' ]
-    # Orbs start earlyoom and install kubectl, then start orbd.
+    # Orbs start earlyoom, install kubectl and set up SSH to GitHub, then start orbd.
     [ ''command:["/opt/orbd/orbd"]'' "command:${builtins.toJSON [ "/bin/sh" "-c" start ]}" ]
   ];
 

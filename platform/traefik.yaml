@@ -31,6 +31,11 @@ spec:
     resources:
       requests: {cpu: 50m, memory: 64Mi}
       limits: {memory: 256Mi}
+    providers:
+      kubernetesCRD:
+        # For github-ssh below. Only Traefik's own routes (IngressRouteTCP and the like), which
+        # agents cannot create, may name an ExternalName Service; apps' Ingresses still cannot.
+        allowExternalNameServices: true
     ingressClass:
       enabled: true
       isDefaultClass: true
@@ -56,3 +61,30 @@ spec:
       default:
         defaultCertificate:
           secretName: wildcard-tls
+---
+# SSH to GitHub for orbs, and to nothing else. Their egress gateway passes only TLS that names a
+# server (and plain HTTP), so orbs wrap SSH in TLS to github-ssh.<apps' domain> (provider.nix
+# sets that up in every orb); Traefik unwraps it with the wildcard certificate and relays the
+# bytes to github.com:22. GitHub's host key is still checked end to end. Traefik runs on the apps
+# machine, which must reach github.com:22.
+apiVersion: v1
+kind: Service
+metadata:
+  name: github-ssh
+  namespace: traefik
+spec:
+  type: ExternalName
+  externalName: github.com
+  ports: [{name: ssh, port: 22, protocol: TCP}]
+---
+apiVersion: traefik.io/v1alpha1
+kind: IngressRouteTCP
+metadata:
+  name: github-ssh
+  namespace: traefik
+spec:
+  entryPoints: [websecure]
+  routes:
+  - match: HostSNI(`github-ssh.apps.example.com`)
+    services: [{name: github-ssh, port: 22}]
+  tls: {}

@@ -130,7 +130,7 @@ let
   providerImage = (builtins.head (builtins.filter (c: c.name == "provider")
     (builtins.head (builtins.filter (r: r.kind == "Deployment" && r.metadata.name == "amp-orb-provider") chartResources))
       .spec.template.spec.initContainers)).image;
-  providerJs = import ./provider.nix { inherit lib pkgs fail kubernetesVersion; image = providerImage; };
+  providerJs = import ./provider.nix { inherit lib pkgs fail kubernetesVersion; inherit (cfg) appsDomain; image = providerImage; };
 
   patches = [
     (resource "Deployment" "ate-system" "ate-api-server" [
