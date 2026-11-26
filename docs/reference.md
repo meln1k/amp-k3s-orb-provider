@@ -33,7 +33,7 @@ container mounts the result from the server's Nix store. The root-only
   the snapshot gateway requests 250m and atelet's objectstore plugin 100m, and the provider's
   probes get 10 s instead of 1 s, so busy orbs do not starve the control plane, stall snapshot
   uploads or get the provider restarted.
-- Warm workers: one idle `small` worker, the default type, instead of one 16-CPU, 32 GiB
+- Warm workers: one idle `tiny` worker, the default type, instead of one 16-CPU, 32 GiB
   worker, and no extra workers to fill a node's free room. On a 16-CPU server a spawn on it took
   about 10 s, and a cold one 22 s.
 - earlyoom: the same patch starts earlyoom in every orb, so a runaway process is stopped
@@ -149,10 +149,10 @@ the node's IPv6 address, and when the router hands out a new IPv6 prefix, K3s ex
 start ("NodeIPs changed for the node") before systemd restarts it.
 
 On a server with 8 cores, 16 threads and 24 GB, memory runs out first: after the reservation and
-the control plane, 4 `small` orbs fit, the warm worker counted as one, or 1 `small` and about 7
-`tiny` (measured: 23868316Ki allocatable, 2412Mi requested before any orb). Those orbs can use at
-most 8 or 9 threads between
-them, so the shared services keep the rest even when every orb is busy.
+the control plane, 4 `small` orbs fit beside the warm `tiny` worker, or 1 `small` and about 7
+`tiny`, the warm worker counted as one (measured: 23868316Ki allocatable, 2412Mi requested before
+any orb). Those orbs can use at most 8 or 9 threads between them, so the shared services keep
+the rest even when every orb is busy.
 
 ### Running out of memory
 

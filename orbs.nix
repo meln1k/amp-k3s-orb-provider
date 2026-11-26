@@ -35,16 +35,16 @@ let
       # adding worker pods that can never schedule.
       autoFill = false;
       # The Amp-hosted a1.* sizes. Names must match the orb types on the provider in Amp. A worker
-      # reserves memoryGi + 128 MiB and its whole CPU. One warm `small` worker, so a spawn of the
+      # reserves memoryGi + 128 MiB and its whole CPU. One warm `tiny` worker, so a spawn of the
       # default type skips starting a worker pod; it holds its CPU and memory even while idle.
       types = [
-        { name = "tiny"; cpu = 1; memoryGi = 2; min = 0; warm = 0; }
-        { name = "small"; cpu = 2; memoryGi = 4; min = 0; warm = 1; }
+        { name = "tiny"; cpu = 1; memoryGi = 2; min = 0; warm = 1; }
+        { name = "small"; cpu = 2; memoryGi = 4; min = 0; warm = 0; }
         { name = "medium"; cpu = 4; memoryGi = 8; min = 0; warm = 0; }
         { name = "large"; cpu = 8; memoryGi = 16; min = 0; warm = 0; }
         { name = "xxlarge"; cpu = 16; memoryGi = 32; min = 0; warm = 0; }
       ];
-      default = "small";
+      default = "tiny";
     };
   };
 

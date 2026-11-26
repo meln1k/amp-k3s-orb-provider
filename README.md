@@ -106,7 +106,7 @@ orb, `create` is refused: have the user click **Add Provider** in
 secret `ORB_PROVIDER_TOKEN`.
 
 The user then edits the provider in [Settings → Orbs](https://ampcode.com/settings/orbs) and adds
-these types, `small` the default, named as `workers.types` in [`orbs.nix`](orbs.nix):
+these types, `tiny` the default, named as `workers.types` in [`orbs.nix`](orbs.nix):
 
 | Type | CPU | Memory |
 | --- | --- | --- |
@@ -117,7 +117,7 @@ these types, `small` the default, named as `workers.types` in [`orbs.nix`](orbs.
 | `xxlarge` | 16 | 32 GiB |
 
 Check with `manage_amp` (topic `orb_providers`, operation `list`) that the type names are exactly
-these, with `small` the default (`list` shows no CPU or memory): an orb of a misspelled type never
+these, with `tiny` the default (`list` shows no CPU or memory): an orb of a misspelled type never
 starts. Amp cannot rename a type; the user adds the right one and removes the wrong one.
 
 ### 4. Install
@@ -198,7 +198,7 @@ lists `amp-orbs`, the Job `substrate-bootstrap-<hash>` in `amp-orbs` completed, 
 `traefik` and `registry` is Running on the apps machine (`kubectl get pods -A -o wide`), `kubectl -n traefik get certificate wildcard` is
 Ready, `x.<domain>` resolves to Traefik's 100.x address, and `curl https://x.<domain>` from the
 tailnet gets Traefik's 404 with a valid certificate. Last, start a thread on the provider with
-`create_thread` (`orb_provider` its name, `orb_size` `small`, `project` `no-project`) that runs
+`create_thread` (`orb_provider` its name, `orb_size` `tiny`, `project` `no-project`) that runs
 `uname -a`. Its first spawn takes about 1.5 minutes; when the spawner log shows `Orb spawned` for
 `amp-<its thread ID without T->`, this cluster serves the provider.
 
