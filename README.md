@@ -141,6 +141,9 @@ amp-k3s.nixosModules.default
     # optional: the apps' SQLite backups, encrypted on an NFS export (docs/reference.md, Backups)
     # backups.nas = { server = "<NAS IPv4>"; path = "<export>"; };
 
+    # the apps machine, optional: orbs too, when the server is full (docs/reference.md, Machine roles)
+    # orbs = true;
+
     # every other machine:
     # serverAddr = "https://<server IPv4>:6443";
     # tokenFile = "/root/k3s-token";

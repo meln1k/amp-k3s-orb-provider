@@ -93,8 +93,17 @@ in
       type = lib.types.enum [ "server" "apps" "burst" ];
       description = ''
         server: the K3s server, with the shared services and orbs. apps: the apps platform and
-        the apps, never orbs. burst: orbs only when the other machines are full, and tasks
+        the apps, and orbs only with `orbs` set. burst: orbs only when the other machines are full, and tasks
         (platform/tasks.yaml), never apps; shut it down when you do not need it.
+      '';
+    };
+    orbs = lib.mkOption {
+      type = lib.types.bool;
+      default = cfg.role != "apps";
+      defaultText = lib.literalExpression ''config.services.amp-orbs.role != "apps"'';
+      description = ''
+        Whether orbs run on this machine. On the apps machine, they take it only when the server
+        is full, as on a burst machine.
       '';
     };
     nodeIP = lib.mkOption {
@@ -164,19 +173,20 @@ in
         serverAddr = lib.mkIf (!server) cfg.serverAddr;
         tokenFile = lib.mkIf (!server) cfg.tokenFile;
         # K3s sets labels and taints when a node registers. Orbs run only where atelet runs, on
-        # nodes with the gvisor label. The apps machine has none and a taint orb workers do not
-        # tolerate; the apps platform's namespaces put their pods there (platform/*.yaml). Apps
-        # themselves (the apps namespace) also run on the server, which has no taint. Burst
-        # machines take orbs only when the others are full, and the tasks namespace's pods, which
-        # run nowhere else; they never run apps (no runs-apps label).
-        nodeLabel = {
-          server = [ "ate.dev/sandboxClass=gvisor" "amp-orbs/runs-apps=true" ];
+        # nodes with the gvisor label (`orbs`). The apps machine has a taint that the apps
+        # platform's namespaces tolerate and put their pods there (platform/*.yaml): NoSchedule
+        # without orbs, so no other pod runs there, and PreferNoSchedule with them, so orbs take
+        # it last. Apps themselves (the apps namespace) also run on the server, which has no
+        # taint. Burst machines take orbs only when the others are full, and the tasks
+        # namespace's pods, which run nowhere else; they never run apps (no runs-apps label).
+        nodeLabel = lib.optional cfg.orbs "ate.dev/sandboxClass=gvisor" ++ {
+          server = [ "amp-orbs/runs-apps=true" ];
           apps = [ "amp-orbs/role=apps" "amp-orbs/runs-apps=true" ];
-          burst = [ "ate.dev/sandboxClass=gvisor" "amp-orbs/role=burst" ];
+          burst = [ "amp-orbs/role=burst" ];
         }.${cfg.role};
         nodeTaint = {
           server = [ ];
-          apps = [ "amp-orbs/apps=true:NoSchedule" ];
+          apps = [ "amp-orbs/apps=true:${if cfg.orbs then "PreferNoSchedule" else "NoSchedule"}" ];
           burst = [ "amp-orbs/burst=true:PreferNoSchedule" ];
         }.${cfg.role};
         # CPU kept out of what pods can request, for K3s itself (API server, kubelet, containerd)

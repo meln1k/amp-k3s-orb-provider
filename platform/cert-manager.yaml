@@ -8,7 +8,7 @@ metadata:
     # On the apps machine only (nixos.nix): PodNodeSelector adds the selector, and
     # PodTolerationRestriction the toleration for its taint, to every pod here.
     scheduler.alpha.kubernetes.io/node-selector: amp-orbs/role=apps
-    scheduler.alpha.kubernetes.io/defaultTolerations: '[{"key": "amp-orbs/apps", "operator": "Exists", "effect": "NoSchedule"}]'
+    scheduler.alpha.kubernetes.io/defaultTolerations: '[{"key": "amp-orbs/apps", "operator": "Exists"}]'
 ---
 apiVersion: helm.cattle.io/v1
 kind: HelmChart

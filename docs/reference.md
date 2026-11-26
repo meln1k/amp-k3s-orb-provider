@@ -125,8 +125,10 @@ Each machine has a `role` in the module:
   store the snapshot gateway used about 1 core; on a busy server, raise its CPU request in
   `orbs.nix` from 250m.
 - **apps:** the apps platform and the apps; apps also run on the server. It has no
-  `ate.dev/sandboxClass` label, so atelet does not run there, and a `NoSchedule` taint that orb workers do not tolerate, so no orb runs
-  there. The platform's namespaces carry `PodNodeSelector` and `PodTolerationRestriction`
+  `ate.dev/sandboxClass` label, so atelet does not run there, and a `NoSchedule` taint that orb
+  workers do not tolerate, so no orb runs there. With `orbs = true` it gets the label and a
+  `PreferNoSchedule` taint instead, and takes orbs as a burst machine does, when the server is
+  full. The platform's namespaces carry `PodNodeSelector` and `PodTolerationRestriction`
   annotations, which the API server adds to every pod in them: a selector for the machine's
   `amp-orbs/role=apps` label (`amp-orbs/runs-apps=true` in `apps`, which the server has too) and a
   toleration for its taint. An agent cannot move an app off these machines: a pod's own
@@ -142,7 +144,9 @@ Each machine has a `role` in the module:
 
 K3s adds a machine's labels again each time it starts, but its taints only when the node first
 registers. To change a machine's role later, remove the old label and change its taints with
-`kubectl label` and `kubectl taint` as well, or delete the node and restart K3s on it.
+`kubectl label` and `kubectl taint` as well, or delete the node and restart K3s on it. After
+turning on `orbs` on a registered apps machine, swap its taint:
+`kubectl taint node <name> amp-orbs/apps=true:NoSchedule- amp-orbs/apps=true:PreferNoSchedule`.
 
 The module sets `nodeIP` on every node to its LAN IPv4 address. Otherwise K3s also records
 the node's IPv6 address, and when the router hands out a new IPv6 prefix, K3s exits on its next
@@ -356,11 +360,11 @@ through the egress gateway, which resolves names with the cluster's DNS:
 
 ### Apps and orbs
 
-Apps run on the apps machine and the server, wherever the scheduler finds room; orbs never run
-on the apps machine (see [Machine roles](#machine-roles)). The `apps` namespace selects nodes
+Apps run on the apps machine and the server, wherever the scheduler finds room; orbs run on the
+apps machine only with `orbs = true` (see [Machine roles](#machine-roles)). The `apps` namespace selects nodes
 labelled `amp-orbs/runs-apps=true`, which the module sets on both. The rest of the platform
 (Traefik, the registry, cert-manager, the Tailscale operator) stays on the apps
-machine. On the server, an app's memory request comes out of what orbs can reserve. Unlike
+machine. On a machine that runs orbs, an app's memory request comes out of what orbs can reserve. Unlike
 orbs, apps mostly idle, so they are overprovisioned on CPU: an app container that sets nothing
 requests 50m and has no CPU limit, so it uses whatever CPU its machine has free, and its
 memory limit equals its 128 MiB request. The quota in `apps.yaml` caps all apps together at
