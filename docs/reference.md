@@ -276,6 +276,32 @@ Things to know:
 - **Leftover cgroups:** each file-only pause leaves a few empty cgroups for the orb on its
   worker's node. They hold no processes and are removed slowly.
 
+### Paused orbs that hang
+
+A pause saves the orb's memory and every file it has written: gVisor keeps those files in the
+rootfs overlay, so an orb with many GB of build output writes that much on every pause, with
+either kind of snapshot. Substrate's gVisor worker (agent-substrate/substrate `c4c6e1b`) first
+moves the sandbox into a cgroup `<uid>-_ckpt` whose `memory.high` is the worker's memory limit
+minus what the pod already uses, mostly the sandbox's page cache. After a resume that can be below
+the sandbox's own memory, and with no swap every allocation stalls at `memory.high`. Measured on
+`tiny` orbs after a long build session, the second pause of each:
+
+- the checkpoint stops writing, two sandbox threads sit in `__mem_cgroup_handle_over_high`, and
+  `runsc debug` stops answering;
+- at 600 s the provider gives up (`DEADLINE_EXCEEDED`); the sandbox then finishes the save with
+  nobody waiting and exits, and the orb stays `SUSPENDING`;
+- on the next resume the provider retries the pause, `runsc checkpoint` exits with 128 because
+  there is no sandbox, and the reaper deletes the orb with all its snapshots: the thread gets an
+  empty orb.
+
+A first pause gets enough headroom and is only slow: 153 s and 351 s for 15 and 21 GB, slower still
+while another orb on the node pauses. `tiny` orbs, with the least headroom, are the most exposed.
+
+`nixos.nix` works around it: `amp-orbs-ckpt-memory` sets `memory.high` to `max` on every `*_ckpt`
+cgroup within a second (`journalctl -u amp-orbs-ckpt-memory` lists each one). In the test, a stuck
+pause wrote again within 5 s and finished. The pod's `memory.max` still bounds it. Remove the
+service once Substrate stops capping the checkpoint below the sandbox's memory.
+
 ## Apps platform
 
 The same cluster hosts long-running apps next to the orbs, like self-hosted Amp Boxes. An agent

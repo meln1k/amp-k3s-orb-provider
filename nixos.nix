@@ -157,6 +157,30 @@ in
       # K3s reads it only when it starts.
       systemd.services.k3s.restartTriggers = [ registries ];
 
+      # Workaround for a Substrate bug: to checkpoint an orb, the gVisor worker moves its sandbox
+      # into a cgroup <uid>-_ckpt whose memory.high is the worker's memory limit minus what the pod
+      # already uses. After a resume that is below the sandbox's own memory, and with no swap every
+      # allocation then stalls at memory.high: the pause hangs until the provider's 600 s timeout,
+      # and the orb is lost on its next resume (docs/reference.md, Paused orbs that hang). Lifting
+      # the cap unsticks it within seconds; the pod's memory.max still applies.
+      systemd.services.amp-orbs-ckpt-memory = {
+        description = "Lift memory.high on gVisor checkpoint cgroups";
+        wantedBy = [ "multi-user.target" ];
+        script = ''
+          while :; do
+            find /sys/fs/cgroup/kubepods.slice -maxdepth 5 -type d -name '*-_ckpt' 2>/dev/null |
+              while read -r d; do
+                h=$(cat "$d/memory.high" 2>/dev/null) || continue
+                if [ "$h" != max ] && echo max > "$d/memory.high" 2>/dev/null; then
+                  echo "lifted memory.high $h -> max on $d"
+                fi
+              done
+            sleep 1
+          done
+        '';
+        serviceConfig.Restart = "always";
+      };
+
       services.k3s = {
         enable = true;
         role = if server then "server" else "agent";
