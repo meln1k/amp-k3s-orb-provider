@@ -27,8 +27,8 @@ container mounts the result from the server's Nix store. The root-only
 - Memory snapshots: the build patches two settings in the provider's code, so a pause
   saves process memory too and returns before the upload (see
   [Memory snapshots](#memory-snapshots)).
-- Worker size: the same patch gives each orb's worker pod its memory plus 128 MiB instead of
-  plus 1 GiB, and has it request its whole CPU, its limit, instead of 1 CPU (see [Sizing](#sizing)).
+- Worker size: the same patch has each orb's worker pod request its memory plus 128 MiB instead
+  of plus 1 GiB, with a limit 128 MiB higher (so it may swap), and request its whole CPU, its limit, instead of 1 CPU (see [Sizing](#sizing)).
 - CPU under load: Substrate's containers that request no CPU get small requests (350m in total),
   the snapshot gateway requests 250m and atelet's objectstore plugin 100m, and the provider's
   probes get 10 s instead of 1 s, so busy orbs do not starve the control plane, stall snapshot
@@ -104,8 +104,11 @@ warm worker, so the idle workers keep their CPU and memory requests until then.
 The chart gives each worker pod 1 GiB on top of the orb's memory. The worker keeps only 64 MiB of
 that for itself, kills an orb that stays over its own `memoryGi`, and limits a pause's page cache
 to what the orb leaves unused, so the pod stays under its limit with any extra of at least 64 MiB.
-The rest only lets a pause write faster. On the [Performance](#performance) machine at plus
-128 MiB, `small` orbs holding over 3 GiB came within 44 MiB of the pod's limit while pausing, and
+The rest only lets a pause write faster. The patch requests plus 128 MiB and limits the pod at
+plus 256 MiB, since the kubelet's `LimitedSwap` gives no swap to a container whose limit equals
+its request; a pod over its request is among the first evicted under node memory pressure, but
+the worker holds the orb at its size, so only a pause's page cache uses that room. On the
+[Performance](#performance) machine at plus 128 MiB, `small` orbs holding over 3 GiB came within 44 MiB of the pod's limit while pausing, and
 no pod reached it. An orb that goes over its own memory is killed at any extra, and Amp's
 provider then deletes it with its snapshots, so give orbs a size with room to spare and see
 [Running out of memory](#running-out-of-memory).
@@ -228,7 +231,8 @@ of the last 2 s. gVisor keeps the orb's memory in shmem, which the kernel can on
 and gVisor's own memory (hundreds of MiB) counts too while the orb cannot see it: an orb that
 shows 1.8 GiB available can already be at its limit on the host, so earlyoom never acts. The
 kubelet's `LimitedSwap` (`nixos.nix`) lets worker containers swap, in proportion to their memory
-request, on machines with swap: about 2.9 GiB for a `small` orb on a machine with 23 GiB of
+request, on machines with swap (only containers whose limit is above their request, hence the
+patch's extra 128 MiB of limit): about 2.9 GiB for a `small` orb on a machine with 23 GiB of
 memory and 16 GiB of swap. Swap also takes pages a pause briefly pushes over the worker
 container's own limit.
 

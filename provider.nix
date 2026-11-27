@@ -71,9 +71,10 @@ let
     [ ''preferredFidelity:"SNAPSHOT_FIDELITY_ROOTFS"'' ''preferredFidelity:"SNAPSHOT_FIDELITY_MEMORY"'' ]
     # A pause returns once the snapshot is on the node; the upload continues in the background.
     [ ''{durable:"DURABILITY_MODE_SYNCHRONOUS",'' ''{durable:"DURABILITY_MODE_ASYNCHRONOUS",'' ]
-    # Worker pods get the orb's memory plus 128 MiB instead of plus 1 GiB, as their limit and as
-    # their request (memoryRequestGi, which is memoryGi unless an orb type sets it lower).
-    [ "`\${i.memoryGi+1}Gi`" "`\${i.memoryGi*1024+128}Mi`" ]
+    # Worker pods request the orb's memory plus 128 MiB instead of plus 1 GiB (memoryRequestGi,
+    # which is memoryGi unless an orb type sets it lower), and get 128 MiB more as their limit:
+    # the kubelet's LimitedSwap gives no swap to a container whose limit equals its request.
+    [ "`\${i.memoryGi+1}Gi`" "`\${i.memoryGi*1024+256}Mi`" ]
     [ "`\${i.memoryRequestGi+1}Gi`" "`\${i.memoryRequestGi*1024+128}Mi`" ]
     # Worker pods request the orb's whole CPU, its limit, instead of 1 CPU: compilers and browsers
     # keep orbs busy, and a node that admits more orb CPU than it has slows every orb down.

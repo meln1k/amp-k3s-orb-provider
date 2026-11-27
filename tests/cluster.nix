@@ -86,16 +86,17 @@ let
       }];
     };
     drainTask = pod "tasks" "drain-task" { };
-    # Burstable, as orb workers are: a memory request and a higher limit.
+    # Resources shaped like a patched orb worker's (provider.nix): its limit 128 MiB over its
+    # request. Beside it one whose limit equals its request, which LimitedSwap gives no swap.
     swapWorker = lib.recursiveUpdate (orbWorker "swap-worker") {
       spec.nodeName = "burst";
-      spec.containers = [{
-        name = "main";
+      spec.containers = map (c: {
+        inherit (c) name;
         image = "test.local/pause:local";
         imagePullPolicy = "Never";
         command = [ "sleep" "inf" ];
-        resources = { requests.memory = "256Mi"; limits.memory = "512Mi"; };
-      }];
+        resources = { requests.memory = "256Mi"; limits.memory = c.limit; };
+      }) [ { name = "main"; limit = "384Mi"; } { name = "equal"; limit = "256Mi"; } ];
     };
     atelet = {
       apiVersion = "v1";
@@ -274,10 +275,13 @@ pkgs.testers.runNixOSTest {
     with subtest("an orb worker may swap"):
         apply("${manifests.swapWorker}")
         assert node_of("amp-orbs", "swap-worker") == "burst"
-        cid = burst.succeed("k3s crictl ps --name main --pod $(k3s crictl pods --name swap-worker -q) -q").strip()
-        swap = int(burst.succeed(f"cat /sys/fs/cgroup/kubepods.slice/kubepods-burstable.slice/*/cri-containerd-{cid}.scope/memory.swap.max").strip())
+        def swap_max(container):
+            cid = burst.succeed(f"k3s crictl ps --name {container} --pod $(k3s crictl pods --name swap-worker -q) -q").strip()
+            return int(burst.succeed(f"cat /sys/fs/cgroup/kubepods.slice/kubepods-burstable.slice/*/cri-containerd-{cid}.scope/memory.swap.max").strip())
         # LimitedSwap: request / node memory x swap, about 256 MiB of 2 GiB of 1 GiB swap.
+        swap = swap_max("main")
         assert 64 << 20 < swap < 256 << 20, swap
+        assert swap_max("equal") == 0
         kc("-n amp-orbs delete pod swap-worker --wait=false")
 
     with subtest("amp-orbs-ckpt-memory lifts memory.high on a checkpoint cgroup"):
