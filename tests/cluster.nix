@@ -5,6 +5,7 @@
 # - pods land where the namespaces' annotations and the orb workers' affinity send them;
 # - what an agent (amp:<user>) may do, and the ValidatingAdmissionPolicies around it;
 # - amp-orbs-ckpt-memory lifts memory.high on a checkpoint cgroup;
+# - an orb worker, a Burstable pod, may swap (LimitedSwap);
 # - the burst machine's shutdown drain against the real API, with the kubelet's credentials, and
 #   a stand-in for atelet's metrics page (the real atelet needs Substrate's images);
 # - the server drops a stale amp-* manifest link before K3s starts.
@@ -85,6 +86,17 @@ let
       }];
     };
     drainTask = pod "tasks" "drain-task" { };
+    # Burstable, as orb workers are: a memory request and a higher limit.
+    swapWorker = lib.recursiveUpdate (orbWorker "swap-worker") {
+      spec.nodeName = "burst";
+      spec.containers = [{
+        name = "main";
+        image = "test.local/pause:local";
+        imagePullPolicy = "Never";
+        command = [ "sleep" "inf" ];
+        resources = { requests.memory = "256Mi"; limits.memory = "512Mi"; };
+      }];
+    };
     atelet = {
       apiVersion = "v1";
       kind = "Pod";
@@ -152,6 +164,8 @@ pkgs.testers.runNixOSTest {
     burst = {
       imports = [ (agent "burst") ];
       services.amp-orbs.preferOrbs = true;
+      # The test VM module empties swapDevices at this priority.
+      swapDevices = lib.mkVMOverride [{ device = "/var/lib/swapfile"; size = 1024; }];
     };
   };
 
@@ -256,6 +270,15 @@ pkgs.testers.runNixOSTest {
             assert status == 0, out
         # The Role and RoleBinding policies apply to agents only, not to the platform's admins.
         apply("${manifests.roleSecrets}")
+
+    with subtest("an orb worker may swap"):
+        apply("${manifests.swapWorker}")
+        assert node_of("amp-orbs", "swap-worker") == "burst"
+        cid = burst.succeed("k3s crictl ps --name main --pod $(k3s crictl pods --name swap-worker -q) -q").strip()
+        swap = int(burst.succeed(f"cat /sys/fs/cgroup/kubepods.slice/kubepods-burstable.slice/*/cri-containerd-{cid}.scope/memory.swap.max").strip())
+        # LimitedSwap: request / node memory x swap, about 256 MiB of 2 GiB of 1 GiB swap.
+        assert 64 << 20 < swap < 256 << 20, swap
+        kc("-n amp-orbs delete pod swap-worker --wait=false")
 
     with subtest("amp-orbs-ckpt-memory lifts memory.high on a checkpoint cgroup"):
         d = "/sys/fs/cgroup/kubepods.slice/test-_ckpt"

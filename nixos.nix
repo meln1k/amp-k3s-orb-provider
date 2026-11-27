@@ -226,6 +226,13 @@ in
         extraKubeletConfig = {
           kubeReserved.cpu = "500m";
           systemReserved.cpu = "500m";
+          # Burstable pods, orb workers among them, may swap, in proportion to their memory
+          # request (request / node memory x swap); without it the kubelet gives every container
+          # memory.swap.max 0. gVisor keeps an orb's memory in shmem, which only swap can take
+          # off the node's RAM: with none, an orb at its size has nothing to give back, and the
+          # worker's memory guard kills it (docs/reference.md, Running out of memory). Needs swap
+          # on the machine; with none it changes nothing.
+          memorySwap.swapBehavior = "LimitedSwap";
         };
       };
 

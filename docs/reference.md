@@ -219,6 +219,19 @@ its limit. It did the same after the orb was paused and woken. An orb is unprote
 first seconds, and because earlyoom picks only by size, a large build or test run can still be the
 one it stops. Orbs created before the patch keep their old setup until they are recreated.
 
+What kills an orb is its worker on the host, not anything in the orb. The worker runs the
+sandbox in a cgroup whose `memory.high` is the orb's size, and every 250 ms Substrate's memory
+guard ([`memwatch.go`](https://github.com/agent-substrate/substrate/blob/main/internal/ateworker/cgroup/memwatch.go))
+kills the sandbox when its memory besides page cache (anon, shmem, kernel, sock) is more than
+16 MiB over that size, or when it stays within 1/16 of it while stalled on memory for a quarter
+of the last 2 s. gVisor keeps the orb's memory in shmem, which the kernel can only move to swap,
+and gVisor's own memory (hundreds of MiB) counts too while the orb cannot see it: an orb that
+shows 1.8 GiB available can already be at its limit on the host, so earlyoom never acts. The
+kubelet's `LimitedSwap` (`nixos.nix`) lets worker containers swap, in proportion to their memory
+request, on machines with swap: about 2.9 GiB for a `small` orb on a machine with 23 GiB of
+memory and 16 GiB of swap. Swap also takes pages a pause briefly pushes over the worker
+container's own limit.
+
 ### Snapshot store
 
 Paused orbs live in the `versitygw` pod on the server, one plain file per object under
