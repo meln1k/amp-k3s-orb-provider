@@ -257,7 +257,11 @@ in
         description = "Pause this machine's orbs and upload their snapshots before it shuts down";
         wantedBy = [ "multi-user.target" ];
         after = [ "k3s.service" ];
-        environment.CONSOLE_FONT = "${pkgs.terminus_font}/share/consolefonts/ter-v32n.psf.gz";
+        environment = {
+          CONSOLE_FONT = "${pkgs.terminus_font}/share/consolefonts/ter-v32n.psf.gz";
+          # k3s kubectl and crictl warn on every call without it.
+          HOME = "/root";
+        };
         serviceConfig = {
           ExecStart = "${pkgs.writeShellApplication {
             name = "shutdown-drain";
