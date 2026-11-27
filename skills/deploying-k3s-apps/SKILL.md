@@ -379,7 +379,7 @@ they start: run `kubectl rollout restart deploy/$APP` after a change.
 Short, CPU-heavy work the user asks to run in the cluster, such as a test or simulation sweep,
 runs as a Job in the namespace `tasks`, on the burst machines, never in `apps`. Build and push
 its image as in Build and push, and set `REF` as in Deploy. While every burst machine is off, its pods stay
-Pending: tell the user to boot one. A shutdown stops the pods within 9.5 minutes, and the Job
+Pending: tell the user to boot one. A shutdown evicts the pods, and the Job
 runs them again from the start, so write results somewhere outside the pod (logs, or the
 internet) as they come.
 

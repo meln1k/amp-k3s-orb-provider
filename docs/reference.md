@@ -131,13 +131,53 @@ Each machine has a `role` in the module:
   `amp-orbs/role=apps` label (`amp-orbs/runs-apps=true` in `apps`, which the server has too) and a
   toleration for its taint. An agent cannot move an app off these machines: a pod's own
   conflicting selector is refused.
-- **burst:** orbs, when the others are full: a `PreferNoSchedule` taint makes the scheduler pick
-  it last, though not strictly. Its shutdown waits up to 15 minutes: the kubelet's graceful
-  shutdown stops the orb workers first, which suspend their orbs, then gives atelet, a critical
-  pod, its 330 s to upload the snapshots to the server. Not tested yet: whether atelet finishes
-  every upload in that time. A snapshot it did not upload stays only on the burst machine, and
-  waking that orb elsewhere fails, which deletes it (see [Snapshot store](#snapshot-store)); boot
-  the machine again before waking such an orb. It also runs tasks, short compute-heavy Jobs such
+- **burst:** orbs, when the server is full: a `PreferNoSchedule` taint makes the scheduler pick
+  it after the server, though not strictly. The apps machine has the same kind of taint, so
+  neither goes first: the scheduler's other scores decide, mostly free CPU and memory and
+  whether the worker image is already on the node, so a large burst machine usually wins.
+  With `preferOrbs`, for a fast machine, the scheduler favours it for orbs while it is up and
+  has room: it gets the `amp-orbs/prefer-orbs=true` label, which the orb workers' preferred node
+  affinity (`provider.nix`) favours, and no taint, since the scheduler weighs an untolerated
+  `PreferNoSchedule` taint above a preferred affinity. It is a preference, not an order: once a
+  few workers of one orb type are there, the scheduler's spreading across nodes can cancel it,
+  and a node that already holds the worker image or has much more room can outscore it. K3s
+  never removes a label and sets taints only when a node first registers: a machine registered as a plain
+  burst machine keeps its taint (`kubectl taint node <name> amp-orbs/burst=true:PreferNoSchedule-`),
+  and one that drops `preferOrbs` keeps the label (`kubectl label node <name> amp-orbs/prefer-orbs-`).
+
+  Its shutdown waits, up to an hour, until its orbs are paused and their snapshots are on the
+  server: a snapshot that stays only on the burst machine makes waking that orb elsewhere fail,
+  which deletes it (see [Snapshot store](#snapshot-store)). The kubelet's own graceful shutdown
+  is off on burst machines, since it stops atelet, which uploads, minutes after the orbs pause.
+  Instead `amp-orbs-shutdown-drain` ([`shutdown-drain.sh`](../shutdown-drain.sh)) holds a logind
+  delay lock; when a shutdown or reboot starts, before any unit stops, it:
+
+  - cordons the node with the node's own credentials, marked with the annotation
+    `amp-orbs/drained-by=shutdown` (a node someone had cordoned already stays unmarked; one
+    cordoned by hand during the drain is uncordoned with it);
+  - evicts its task pods, so their Jobs run them elsewhere without counting a failure;
+  - waits for the orb workers to go: the provider counts a cordoned node as draining, pauses its
+    orbs and deletes their workers. Workers still there after 10 minutes are deleted, and each
+    pauses its orb as it exits; after 20, also while the cluster does not answer, it goes on
+    without them;
+  - waits until atelet's `atelet_snapshot_undurable_age_max_seconds`, the age of its oldest
+    snapshot not yet uploaded, reads 0 three times in a row, then releases the lock. If the
+    metric cannot be read for 3 minutes, it logs an error and lets the shutdown go on.
+
+  It shows its progress on text console 12, which it switches to, and in
+  `journalctl -u amp-orbs-shutdown-drain`. With no orb worker on the machine and nothing left to
+  upload, it lets the shutdown go on after about 15 s. When the shutdown is cancelled
+  (`shutdown -c`) during the drain, it uncordons the node, switches back to the console that was
+  shown and keeps the lock, so a shutdown right after still drains; after a boot it uncordons the
+  node if the annotation is there. An upload cut off anyway, by the hour running out or a power cut, resumes when the
+  machine boots again; boot it before waking such an orb. The hour is logind's
+  `InhibitDelayMaxSec`, which applies to every delay lock on the machine.
+
+  A suspend would cut the orbs off without a pause, and they would be lost, so
+  `amp-orbs-no-sleep` refuses it with a logind block lock, also a desktop's idle suspend: shut a
+  burst machine down instead.
+
+  It also runs tasks, short compute-heavy Jobs such
   as test sweeps (see [Tasks](#tasks)), and never apps: it has no `amp-orbs/runs-apps` label.
 
 K3s adds a machine's labels again each time it starts, but its taints only when the node first
@@ -411,9 +451,10 @@ every node pulls from it.
 
 Tasks share the burst machines with orbs. Orbs request their whole CPU, so tasks without a CPU
 limit use only what orbs leave free, and the quota keeps room for orbs that overflow from the
-server. A burst machine's shutdown gives its tasks up to 9.5 minutes to stop (the 15 minutes less
-atelet's 330 s); a Job then runs that pod again on another burst machine, from the start, once
-one is up. Not tested yet on a burst machine.
+server. A burst machine's shutdown evicts its task pods first (see [Machine roles](#machine-roles)): their
+Jobs count that as a disruption, not a failure, and run them again on another burst machine,
+from the start, once one is up. The pods get their termination grace period while the orbs
+pause. Not tested yet on a burst machine.
 
 The registry prunes itself every Sunday at 03:00 UTC. The CronJob `registry-prune` records every
 image the `apps` and `tasks` namespaces still name (pods, Deployments with their rollback

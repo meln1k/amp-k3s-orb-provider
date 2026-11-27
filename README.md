@@ -39,8 +39,8 @@ use `sudo k3s kubectl`.
 ### Ask the user
 
 1. **The machines** and the role of each: one `server` (the control plane, the shared services
-   and orbs), one `apps` machine (the apps platform and the apps, never orbs), and any number of
-   `burst` machines (orbs when the others are full, and compute tasks; they may be shut down). And how to get a root
+   and orbs), one `apps` machine (the apps platform and the apps, and orbs when the server is full), and any number of
+   `burst` machines (orbs when the server is full, and compute tasks; they may be shut down). And how to get a root
    shell on each: this thread running on it, or SSH (host, user, and a key the user puts
    in your workspace or a public key of yours they add to `/root/.ssh/authorized_keys`).
 2. **Their NixOS configuration**: the flake that builds each machine, where it lives, and how

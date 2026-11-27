@@ -93,8 +93,17 @@ in
       type = lib.types.enum [ "server" "apps" "burst" ];
       description = ''
         server: the K3s server, with the shared services and orbs. apps: the apps platform and
-        the apps, and orbs when the server is full. burst: orbs only when the other machines are
-        full, and tasks (platform/tasks.yaml), never apps; shut it down when you do not need it.
+        the apps, and orbs when the server is full. burst: orbs when the server is full, like
+        the apps machine, and tasks (platform/tasks.yaml), never apps; shut it down when you do not need it.
+      '';
+    };
+    preferOrbs = lib.mkOption {
+      type = lib.types.bool;
+      default = false;
+      description = ''
+        Burst only: the scheduler favours this machine for orbs while it is up and has room,
+        rather than the server, such as a fast desktop; a preference, not an order. It gets the
+        amp-orbs/prefer-orbs label, which orb workers prefer, and no burst taint.
       '';
     };
     nodeIP = lib.mkOption {
@@ -139,6 +148,9 @@ in
   config = lib.mkIf cfg.enable (lib.mkMerge [
     {
       assertions = [{
+        assertion = cfg.preferOrbs -> cfg.role == "burst";
+        message = "services.amp-orbs.preferOrbs is for burst machines only.";
+      } {
         # atelet mounts each orb's rootfs with overlayfs "lowerdir+": 6.7+, or 6.6.23+ (backport).
         assertion = lib.versionAtLeast config.boot.kernelPackages.kernel.version "6.6.23";
         message = "services.amp-orbs needs Linux 6.7+ or 6.6.23+ (overlayfs lowerdir+); set boot.kernelPackages.";
@@ -192,17 +204,21 @@ in
         # PreferNoSchedule taint, so orbs take it only when the server is full; the apps
         # platform's namespaces tolerate it and put their pods there (platform/*.yaml). Apps
         # themselves (the apps namespace) also run on the server, which has no taint. Burst
-        # machines take orbs only when the others are full, and the tasks namespace's pods, which
-        # run nowhere else; they never run apps (no runs-apps label).
+        # machines have the same kind of taint, so orbs that do not fit on the server go to them
+        # or the apps machine, whichever scores higher (mostly the one with more free CPU and
+        # memory). They also take the tasks namespace's pods, which run nowhere else; they never
+        # run apps (no runs-apps label).
         nodeLabel = [ "ate.dev/sandboxClass=gvisor" ] ++ {
           server = [ "amp-orbs/runs-apps=true" ];
           apps = [ "amp-orbs/role=apps" "amp-orbs/runs-apps=true" ];
           burst = [ "amp-orbs/role=burst" ];
-        }.${cfg.role};
+        }.${cfg.role} ++ lib.optional cfg.preferOrbs "amp-orbs/prefer-orbs=true";
+        # A preferOrbs machine has no taint: the scheduler weighs an untolerated PreferNoSchedule
+        # taint (3) above a preferred node affinity (2), so with it the label would lose.
         nodeTaint = {
           server = [ ];
           apps = [ "amp-orbs/apps=true:PreferNoSchedule" ];
-          burst = [ "amp-orbs/burst=true:PreferNoSchedule" ];
+          burst = lib.optional (!cfg.preferOrbs) "amp-orbs/burst=true:PreferNoSchedule";
         }.${cfg.role};
         # CPU kept out of what pods can request, for K3s itself (API server, kubelet, containerd)
         # and the host. Orbs request their whole CPU, so without it they could book every core.
@@ -223,16 +239,39 @@ in
       };
     }
 
-    # A burst machine's shutdown waits for its orbs: the kubelet stops the orb workers first, which
-    # suspend their orbs, then atelet (a critical pod, 330 s grace), which uploads the snapshots to
-    # the server. logind has to allow the kubelet to delay the shutdown that long.
+    # A burst machine's shutdown waits until its orbs are paused and their snapshots are on the
+    # server: woken elsewhere, an orb whose snapshot stayed here fails and is deleted. A logind
+    # delay lock holds the shutdown while shutdown-drain.sh cordons the node and waits; the
+    # kubelet's own graceful shutdown is off, since it stops atelet, which uploads, minutes after
+    # the orbs pause (docs/reference.md, Machine roles).
     (lib.mkIf (cfg.role == "burst") {
-      services.k3s.gracefulNodeShutdown = {
-        enable = true;
-        shutdownGracePeriod = "15m";
-        shutdownGracePeriodCriticalPods = "330s";
+      services.logind.settings.Login.InhibitDelayMaxSec = "1h";
+      systemd.services.amp-orbs-shutdown-drain = {
+        description = "Pause this machine's orbs and upload their snapshots before it shuts down";
+        wantedBy = [ "multi-user.target" ];
+        after = [ "k3s.service" ];
+        environment.CONSOLE_FONT = "${pkgs.terminus_font}/share/consolefonts/ter-v32n.psf.gz";
+        serviceConfig = {
+          ExecStart = "${pkgs.writeShellApplication {
+            name = "shutdown-drain";
+            runtimeInputs = [ k3s pkgs.jq pkgs.curl pkgs.gawk pkgs.gnused pkgs.gnugrep pkgs.openssl pkgs.kbd pkgs.coreutils config.systemd.package ];
+            text = builtins.readFile ./shutdown-drain.sh;
+          }}/bin/shutdown-drain serve";
+          # Also after a failure; a real shutdown's stop job wins over the restart.
+          Restart = "always";
+          RestartSec = "30s";
+        };
       };
-      services.logind.settings.Login.InhibitDelayMaxSec = "15min";
+      # A suspend would cut its orbs off without a pause, and they would be lost: refuse it, also
+      # the desktop's idle suspend. Shut the machine down instead.
+      systemd.services.amp-orbs-no-sleep = {
+        description = "Refuse to suspend a machine that holds orbs";
+        wantedBy = [ "multi-user.target" ];
+        serviceConfig = {
+          ExecStart = "${config.systemd.package}/bin/systemd-inhibit --what=sleep --mode=block --who=amp-orbs --why=\"Orbs run here\" ${pkgs.coreutils}/bin/sleep infinity";
+          Restart = "always";
+        };
+      };
     })
 
     (lib.mkIf server {
