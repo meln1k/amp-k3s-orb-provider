@@ -33,8 +33,8 @@ container mounts the result from the server's Nix store. The root-only
   the snapshot gateway requests 250m and atelet's objectstore plugin 100m, and the provider's
   probes get 10 s instead of 1 s, so busy orbs do not starve the control plane, stall snapshot
   uploads or get the provider restarted.
-- Warm workers: one idle `tiny` worker, the default type, instead of one 16-CPU, 32 GiB
-  worker, and no extra workers to fill a node's free room. On a 16-CPU server a spawn on it took
+- Warm workers: one idle `tiny` worker, the default type, and one idle `small` worker, instead
+  of one 16-CPU, 32 GiB worker, and no extra workers to fill a node's free room. On a 16-CPU server a spawn on it took
   about 10 s, and a cold one 22 s.
 - earlyoom: the same patch starts earlyoom in every orb, so a runaway process is stopped
   before the orb runs out of memory (see [Running out of memory](#running-out-of-memory)).
@@ -98,7 +98,7 @@ builds, and earlyoom killed `tsc` once. For builds, use `small` and plan on abou
 An orb holds its worker until it pauses, at least 5 minutes after its agent goes idle. A spawn
 that finds no free worker waits about 9.5 minutes for one, then fails, and Amp retries it. So
 when more orbs start at once than fit, expect some to fail once before they run. After orbs
-pause, the provider waits 1 minute (10 minutes unpatched) before it shrinks the pool back to its
+pause, the provider waits 1 minute (10 minutes unpatched) before it shrinks each pool back to its
 warm worker, so the idle workers keep their CPU and memory requests until then.
 
 The chart gives each worker pod 1 GiB on top of the orb's memory. The worker keeps only 64 MiB of
@@ -195,7 +195,8 @@ start ("NodeIPs changed for the node") before systemd restarts it.
 
 On a server with 8 cores, 16 threads and 24 GB, memory runs out first: after the reservation and
 the control plane, 4 `small` orbs fit beside the warm `tiny` worker, or 1 `small` and about 7
-`tiny`, the warm worker counted as one (measured: 23868316Ki allocatable, 2412Mi requested before
+`tiny`, each warm worker counted as one orb of its type; while idle, the warm `tiny` and `small`
+workers together hold 3 CPU and about 6.3 GiB (measured: 23868316Ki allocatable, 2412Mi requested before
 any orb). Those orbs can use at most 8 or 9 threads between them, so the shared services keep
 the rest even when every orb is busy.
 
