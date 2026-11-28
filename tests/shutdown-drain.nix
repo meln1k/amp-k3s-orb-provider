@@ -1,4 +1,4 @@
-# VM test of a burst machine's shutdown drain (shutdown-drain.sh) with the real unit, logind and
+# VM test of a burst machine's shutdown drain (shutdown-drain/) with the real unit, logind and
 # systemd. K3s is a stub that keeps the node, its orb workers and task pods in files under
 # /var/lib/fake; atelet's metric is a file served on 127.0.0.1:9090. tests/cluster.nix runs the
 # same drain against a real cluster. Run it with KVM, as tests/flake.nix says.

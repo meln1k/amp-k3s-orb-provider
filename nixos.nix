@@ -248,7 +248,7 @@ in
 
     # A burst machine's shutdown waits until its orbs are paused and their snapshots are on the
     # server: woken elsewhere, an orb whose snapshot stayed here fails and is deleted. A logind
-    # delay lock holds the shutdown while shutdown-drain.sh cordons the node and waits; the
+    # delay lock holds the shutdown while shutdown-drain/ cordons the node and waits; the
     # kubelet's own graceful shutdown is off, since it stops atelet, which uploads, minutes after
     # the orbs pause (docs/reference.md, Machine roles).
     (lib.mkIf (cfg.role == "burst") {
@@ -262,11 +262,13 @@ in
           # k3s kubectl and crictl warn on every call without it.
           HOME = "/root";
         };
+        path = [ k3s pkgs.kbd pkgs.coreutils config.systemd.package ];
         serviceConfig = {
-          ExecStart = "${pkgs.writeShellApplication {
-            name = "shutdown-drain";
-            runtimeInputs = [ k3s pkgs.jq pkgs.curl pkgs.gawk pkgs.gnused pkgs.gnugrep pkgs.openssl pkgs.kbd pkgs.coreutils config.systemd.package ];
-            text = builtins.readFile ./shutdown-drain.sh;
+          ExecStart = "${pkgs.buildGoModule {
+            pname = "amp-orbs-shutdown-drain";
+            version = "0";
+            src = ./shutdown-drain;
+            vendorHash = "sha256-HbQtK3Gw03CfMGiW+56XWakds/Ikk3jdETtzTRLdF8Y=";
           }}/bin/shutdown-drain serve";
           # Also after a failure; a real shutdown's stop job wins over the restart.
           Restart = "always";

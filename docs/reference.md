@@ -152,7 +152,7 @@ Each machine has a `role` in the module:
   server: a snapshot that stays only on the burst machine makes waking that orb elsewhere fail,
   which deletes it (see [Snapshot store](#snapshot-store)). The kubelet's own graceful shutdown
   is off on burst machines, since it stops atelet, which uploads, minutes after the orbs pause.
-  Instead `amp-orbs-shutdown-drain` ([`shutdown-drain.sh`](../shutdown-drain.sh)) holds a logind
+  Instead `amp-orbs-shutdown-drain` ([`shutdown-drain/`](../shutdown-drain), in Go) holds a logind
   delay lock; when a shutdown or reboot starts, before any unit stops, it:
 
   - cordons the node with the node's own credentials, marked with the annotation
@@ -167,8 +167,9 @@ Each machine has a `role` in the module:
     snapshot not yet uploaded, reads 0 three times in a row, then releases the lock. If the
     metric cannot be read for 3 minutes, it logs an error and lets the shutdown go on.
 
-  It shows its progress on text console 12, which it switches to, and in
-  `journalctl -u amp-orbs-shutdown-drain`. With no orb worker on the machine and nothing left to
+  It shows its progress on text console 12, which it switches to, as a screen with a step list,
+  a progress bar of paused orbs and each worker's state (Bubble Tea, limited to the 16 colours and
+  the characters the console's Terminus font has), and in `journalctl -u amp-orbs-shutdown-drain`. With no orb worker on the machine and nothing left to
   upload, it lets the shutdown go on after about 15 s. When the shutdown is cancelled
   (`shutdown -c`) during the drain, it uncordons the node, switches back to the console that was
   shown and keeps the lock, so a shutdown right after still drains; after a boot it uncordons the
